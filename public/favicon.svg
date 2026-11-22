@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32">
+  <title>가게 이익 노트</title>
+  <!-- 영수증: 굵은 테두리, 물결 모양 아래쪽. 안쪽을 흰색으로 채워 어두운 탭에서도 보이게 한다 -->
+  <path d="M6.5 28V6Q6.5 3.5 9 3.5H23Q25.5 3.5 25.5 6V28Q23.9 26.4 22.3 28T19.2 28T16 28T12.8 28T9.7 28T6.5 28Z" fill="#fff" stroke="#171412" stroke-width="3" stroke-linejoin="round" />
+  <g stroke="#171412" stroke-width="2" stroke-linecap="round">
+    <path d="M10.5 9.5H17M20.5 9.5H21.5M10.5 13H17M20.5 13H21.5M10.5 16.5H15M20.5 16.5H21.5" />
+  </g>
+  <rect x="10" y="19.5" width="12" height="3" rx="0.8" fill="#171412" />
+</svg>

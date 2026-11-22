@@ -1,0 +1,18 @@
+node_modules
+dist
+dev-dist
+*.log
+.vite
+
+# 환경 설정(배포 주소 등)과 로컬 전용 파일
+.env
+.env.*
+!.env.example
+*.local
+
+# 실제 매출 기록·개인 백업 파일은 커밋하지 않는다 (앱의 백업 내보내기 파일 이름)
+가게이익노트-*.json
+*백업*.json
+restaurant-profit-beta*.json
+backup*.json
+backups/
