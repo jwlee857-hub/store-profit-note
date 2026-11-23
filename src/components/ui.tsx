@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, useState, type ButtonHTMLAttributes, type ReactNode } from 'react';
-import type { Comparison } from '../domain/calc';
+import { basisText, type Comparison } from '../domain/calc';
 import { ESTIMATED_HINT, basisMix, type BasisAmounts } from '../domain/costBasis';
 import { fmt, fmtCalc, fmtPp, fmtSigned, type Unit } from '../domain/format';
 import type { Calc } from '../domain/types';
@@ -18,9 +18,9 @@ export function PageHeader({ title, description, actions }: { title: string; des
   );
 }
 
-export function Card({ title, subtitle, actions, children, className = '' }: { title?: ReactNode; subtitle?: ReactNode; actions?: ReactNode; children: ReactNode; className?: string }) {
+export function Card({ title, subtitle, actions, children, className = '', id }: { title?: ReactNode; subtitle?: ReactNode; actions?: ReactNode; children: ReactNode; className?: string; id?: string }) {
   return (
-    <section className={`rounded-xl bg-white p-4 shadow-sm ring-1 ring-slate-200 sm:p-5 ${className}`}>
+    <section id={id} className={`rounded-xl bg-white p-4 shadow-sm ring-1 ring-slate-200 sm:p-5 ${className}`}>
       {(title || actions) && (
         <div className="mb-3 flex flex-wrap items-start justify-between gap-2">
           <div>
@@ -169,27 +169,35 @@ export function CalcValue({
   const big = size === 'lg' ? 'text-2xl font-bold' : 'font-medium';
   const num = (v: number) => (man && unit === 'won' ? <BigWon value={v} className={`${big} text-slate-900`} /> : <span className={`${big} tabular text-slate-900`}>{fmt(v, unit)}</span>);
   if (calc.value === null) {
-    // 비용이 덜 채워졌어도 입력된 값만 반영한 숫자가 있으면 크게 보여주고 '미확정'을 작게 붙인다
+    const basis = basisText(calc.basis);
+    // 비용이 덜 채워졌어도 입력된 값만 반영한 숫자가 있으면 크게 보여주고 '미확정'을 작게 붙인다.
+    // 매출·할인 기록이 빠진 부분 합계는 '일부 확인'과 확인 범위를 붙인다 (증감은 계산하지 않음)
     if (calc.reason === 'incomplete' && calc.provisional !== null && calc.provisional !== undefined)
       return (
         <span className="inline-flex max-w-full flex-wrap items-baseline gap-x-1.5 gap-y-0.5">
           {num(calc.provisional)}
-          <span className="text-xs font-medium text-slate-500" title="비용 일부가 아직 입력되지 않아 입력된 값만 반영한 숫자입니다">
-            미확정
+          <span
+            className="text-xs font-medium text-slate-500"
+            title={calc.salesGap ? '빠진 매출·할인 기록이 있어 입력된 기록만 더한 부분 합계예요. 이 값으로 증감을 계산하지 않아요.' : '비용 일부가 아직 입력되지 않아 입력된 값만 반영한 숫자입니다'}
+          >
+            {calc.salesGap ? [basis ?? '일부 확인', calc.note].filter(Boolean).join(' · ') : '미확정'}
           </span>
         </span>
       );
-    return <span className={`${size === 'lg' ? 'text-xl font-semibold' : 'font-medium'} text-slate-400`}>{fmtCalc(calc, unit)}</span>;
+    return (
+      <span className={`${size === 'lg' ? 'text-xl font-semibold' : 'font-medium'} text-slate-400`}>
+        {calc.note ?? fmtCalc(calc, unit)}
+        {calc.note && basis && <span className="ml-1 text-xs font-normal">({basis})</span>}
+      </span>
+    );
   }
   return (
     <span className="inline-flex max-w-full flex-wrap items-center gap-x-1.5 gap-y-0.5">
       {num(calc.value)}
       <BasisBadge calc={calc} />
-      {calc.basis && calc.basis.used < calc.basis.total && (
+      {basisText(calc.basis) && (
         <span className="text-xs font-medium text-slate-500" title="값이 입력된 날만으로 계산했습니다">
-          {calc.basis.total}
-          {calc.basis.unit} 중 {calc.basis.used}
-          {calc.basis.unit} 기준
+          {basisText(calc.basis)}
         </span>
       )}
     </span>

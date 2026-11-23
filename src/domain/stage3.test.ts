@@ -1,7 +1,7 @@
 // 3차 개선 1단계: 숫자가 틀리게 나오던 오류. 격리된 샘플 데이터만 사용한다(localStorage 사용 안 함).
 // 샘플은 2026-11-15(일)까지 생성 → 마지막 매출 입력일 2026-11-14(토), 오늘 2026-11-17(화) 상황을 재현한다.
 import { describe, expect, it } from 'vitest';
-import { allocatePeriodCost, allocatePeriodCostCounted, computeComparison, computeSummary, getMetric, profitForDisplay, unrecordedDays } from './calc';
+import { allocatePeriodCost, allocatePeriodCostCounted, basisText, computeComparison, computeSummary, getMetric, profitForDisplay, unrecordedDays } from './calc';
 import { diagnose, diagnoseSummaries, quantityPriceText, topIssues, type QuantityPriceRow } from './diagnosis';
 import { josa } from './format';
 import { presetRanges, referenceDate } from './periods';
@@ -77,14 +77,16 @@ describe('1-2 선택 항목(홀 방문 고객 수) 하루 누락이 기간 전�
     expect(issues.map((f) => f.id).slice(0, 2)).toEqual(['delivery-unit-profit-down', 'hall-visitors-down']);
     expect(Math.round(issues[1].impact!)).toBe(-2_137_648);
   });
-  it('할인·환불 상세가 없는 기록이 있어도 상세가 있는 기록만으로 할인 비율을 계산한다', () => {
+  it('할인·환불 상세가 없는 기록이 있으면 확인된 할인 합계만 보여주고, 할인 비율 변화는 판정하지 않는다', () => {
     const d = sample();
     const e = d.sales.find((x) => x.date === '2026-11-13' && x.channel === 'delivery')!;
     Object.assign(e, { amountMode: 'net', netInput: 500_000, storeDiscount: null, refund: null, gross: null });
     const { dx } = homeView(d, 'recent28');
-    const f = dx.findings.find((x) => x.id === 'delivery-discount-up');
-    expect(f).toBeDefined();
-    expect(f!.fact).toMatch(/분석 기간 \d+건 중 \d+건 기준/);
+    expect(dx.findings.find((x) => x.id === 'delivery-discount-up')).toBeUndefined();
+    expect(dx.caveats.join(' ')).toContain('할인 비율 변화는 판정하지 않습니다');
+    const disc = getMetric(dx.cur, { key: 'storeDiscount', channel: 'delivery' });
+    expect(disc).toMatchObject({ value: null, salesGap: true, note: '확인된 할인 합계' });
+    expect(basisText(disc.basis)).toMatch(/^매출 기록 \d+건 중 \d+건 확인$/);
   });
 });
 

@@ -549,11 +549,14 @@ describe('앱 스모크 테스트', () => {
     expect(del.costs.brokerage.estimateBasis).toContain('설정 기준 계산');
     expect(del.costs.brokerage.estimateBasis).not.toContain('가정');
     expect(del.costs.delivery.estimated).toBe(3300 * 36);
-    // 홈: 숫자는 보이고, 결제 수수료 정보가 없어 미확정
+    // 홈: 숫자는 보이고, 오늘 배달앱 B·포장을 아직 기록하지 않아 부분 합계(일부 확인) — 증감은 보류, 결제 수수료 미입력도 함께 알린다
     const summary = document.querySelector('section[aria-label="기간 요약"]')!.textContent!;
     expect(summary).toMatch(/영업이익[\s\S]*?[\d,]+(만 )?원/);
     expect(summary).not.toContain('데이터 필요');
-    expect(summary).toContain('미확정');
+    expect(summary).toContain('일부 확인');
+    expect(summary).toContain('기록하지 않은 경로·날 3곳');
+    expect(summary).toContain('비용 1개 미입력');
+    expect(summary).not.toMatch(/영업이익[\d,만 원]+일부 확인[▲▼]/);
   });
 
   it('홀 결제 구분: 전부 현금이면 결제 수수료 적용 안 함, 섞이면 카드 결제액에만 계산', async () => {
@@ -943,6 +946,55 @@ describe('앱 스모크 테스트', () => {
     dlg = dialog();
     expect(numVal(inputByLabel('쿠폰 금액', dlg))).toBe('1500');
     expect(dlg.textContent).toContain('결과 판단에서 정한 다음 기간 쿠폰 금액(1,500원)을 불러왔어요');
+  });
+
+  it('5차 1단계: 배달 계획 성과 맨 위에 세 숫자·문장·맥락이 보이고, 빠진 기록은 0원으로 비교하지 않고 채우러 갈 수 있다', async () => {
+    mount();
+    clickButton('샘플로 시작');
+    await go('solutions');
+    clickButton('실행 계획 등록');
+    const dlg = dialog();
+    setInput(inputByLabel('한 줄 요약', dlg), '배달 쿠폰 2주 시험');
+    setSelect(inputByLabel('어디에 적용하나요?', dlg) as unknown as HTMLSelectElement, 'delivery');
+    const ref = addDays(todayStr(), -1);
+    setInput(inputByLabel('시작일', dlg), addDays(ref, -13));
+    setInput(inputByLabel('종료일', dlg), ref);
+    clickButton('저장', dlg);
+    const sol = stored().solutions.find((s) => s.name === '배달 쿠폰 2주 시험')!;
+    await go('performance', `?solution=${sol.id}`);
+    const box = document.querySelector('[aria-label="쿠폰 결정 세 지표"]') as HTMLElement;
+    expect(box.textContent).toMatch(/① 배달 한 건당 남은 돈[\d,]+원→(에서)?[\d,]+원[▲▼]/);
+    expect(box.textContent).toContain('② 배달 전체에서 남은 돈');
+    expect(box.textContent).toContain('③ 가게 전체 영업이익');
+    expect(text()).toMatch(/한 건당 [\d,]+원 (덜|더) 남았(지만|고) 주문이 [\d,]+건 (늘어|줄어) 배달 전체에서는 [\d,]+원 (더|덜) 남았어요\./);
+    expect(text()).toContain('공통비까지 뺀 가게 전체 금액');
+    const ctx = document.querySelector('[aria-label="해석에 필요한 맥락"]')!.textContent!;
+    expect(ctx).toContain('배달 완료 주문 수');
+    expect(ctx).toContain('가게 부담 할인액 (배달)');
+    expect(ctx).toMatch(/실제 영업일 수\d+일 → \d+일/);
+    expect(ctx).toContain('홀·포장 변화');
+    expect(findButton('결과 판단 기록하기')).toBeTruthy();
+    expect(document.getElementById('review-record')).toBeTruthy();
+    expect(text()).not.toContain('빠진 기록이 있어');
+
+    // 실행 후 마지막 날 홀 기록을 지우면: 홀은 0원이 아니라 미입력, 증감·대상 외 경고는 보류
+    const data = stored();
+    data.sales = data.sales.filter((e) => !(e.date === ref && e.channel === 'hall'));
+    unmount();
+    localStorage.setItem(STORAGE_KEY, serialize(data));
+    mount();
+    await go('performance', `?solution=${sol.id}`);
+    expect(text()).toContain('빠진 기록이 있어 일부 비교를 보류했어요');
+    expect(text()).toContain('매장 방문 주문(홀) · 매출 미입력 1일');
+    expect(text()).toContain('비교 보류 · 빠진 기록 있음');
+    // 홀(부분 합계)은 대상 외 변화 판정에서 빠지고, 다 입력된 배달·포장은 계속 비교한다
+    expect(text()).not.toMatch(/대상 외 판매 방식은[^.]*홀/);
+    expect(text()).toMatch(/배달 \(대상\)[\d,]+원[\d,]+원▲/);
+    expect(text()).toMatch(/실제 \(실행 후 − 실행 전\)비교 보류/);
+    clickButton('빠진 기록 채우기');
+    expect(window.location.hash).toContain('sales');
+    expect(window.location.hash).toContain(`date=${ref}`);
+    expect(dialog().textContent).toContain('매장 방문 주문 · 홀');
   });
 
   it('4차 2단계: 홈에 추정값을 확인할 할 일이 보이고(설정대로 계산한 수수료는 제외), 누르면 그 기록만 모은 입력 화면으로 간다', async () => {

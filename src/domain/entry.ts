@@ -1,5 +1,5 @@
 // 매출 기록의 데이터 상태, 금액 기준 전환, 날짜별 입력 현황. UI와 무관한 순수 함수.
-import { applicableCategories, coveredByPeriodCost, effectiveCost, grossSales, isOpenDay, netSales, requiredCategories, routeHasPlatform, type SalesAmounts } from './calc';
+import { applicableCategories, coveredByPeriodCost, effectiveCost, grossSales, isOpenDay, netSales, requiredCategories, routeHasPlatform, salesSlots, type SalesAmounts } from './calc';
 import { costBasisOf, costDetailText, costKindOf } from './costBasis';
 import { averageMenuCostRate, calcFees, estimateFood, feeRuleFor, foodBaseLabel, foodEstimateBase, payKindOf, pickEffective, type FeeCalc, type FeeNeed } from './estimate';
 import { isValidDate } from './dates';
@@ -485,25 +485,9 @@ export function recalcAuto(e: SalesEntry, data: EstimateData): { entry: SalesEnt
 
 // ───────── 날짜별 입력 현황 ─────────
 
-export interface SalesSlot {
-  channel: Channel;
-  routeId: string;
-  label: string;
-}
-
-/** 가게가 운영하는 채널 × 그 채널에 연결된 주문 경로 */
-export function salesSlots(data: Pick<AppData, 'store' | 'routes'>): SalesSlot[] {
-  const chans = data.store?.channels ?? [];
-  const out: SalesSlot[] = [];
-  for (const ch of chans) {
-    const routes = data.routes.filter((r) => r.channels.includes(ch));
-    // 경로 이름만으로는 판매 방식을 알 수 없는 경우가 많아(예: 전화 주문 = 포장) 항상 판매 방식을 붙인다
-    for (const r of routes) out.push({ channel: ch, routeId: r.id, label: `${r.name} · ${CHANNEL_NAME[ch]}` });
-  }
-  return out;
-}
-
-const CHANNEL_NAME: Record<Channel, string> = { hall: '홀', delivery: '배달', takeout: '포장' };
+// 성과 비교의 입력 현황(channelCoverage)과 같은 경로 목록을 쓴다
+export { salesSlots, type SalesSlot } from './calc';
+import type { SalesSlot } from './calc';
 
 export type SlotState =
   | { kind: 'entered'; status: EntryStatus; entries: SalesEntry[]; net: number | null }

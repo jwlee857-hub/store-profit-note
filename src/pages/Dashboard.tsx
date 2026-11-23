@@ -24,7 +24,9 @@ import {
   thR,
 } from '../components/ui';
 import { ESTIMATED_HINT } from '../domain/costBasis';
-import { bucketTotal, compareCalc, compareValues, computeComparison, discountCalc, displayValue, missingCostCount, profitForDisplay, quantityCalc, type ChannelSummary, type PeriodSummary } from '../domain/calc';
+import { GAP_NOTE, bucketTotal, comparableValue, compareCalc, compareValues, computeComparison, discountCalc, missingCostCount, profitForDisplay, quantityCalc, type ChannelSummary, type PeriodSummary } from '../domain/calc';
+import { gapTarget } from '../components/RecordGaps';
+import { recordGaps } from '../domain/review';
 import { pendingEstimates, type PendingItem } from '../domain/pending';
 import { monthOf } from '../domain/months';
 import { WEEKDAY_LABELS, formatRange, isValidRange, shortDate, todayStr } from '../domain/dates';
@@ -189,6 +191,12 @@ function PeriodHeadline({ s, p }: { s: PeriodSummary; p: PeriodSummary }) {
   const estimated = !!s.operatingProfit.estimated;
   const shownProfit = profitForDisplay(s.operatingProfit);
   const missingCosts = missingCostCount(s);
+  const data = useData();
+  // 성과 확인과 같은 기준: 기록하지 않은 경로·날이 있으면 부분 합계라 이전 기간과 빼지 않는다
+  const gaps = recordGaps(data, s).filter((g) => g.kind === 'sales');
+  const gapCount = gaps.reduce((n, g) => n + g.dates.length, 0);
+  const prevCmp = comparableValue(p.operatingProfit);
+  const curCmp = comparableValue(s.operatingProfit);
   return (
     <div className="mt-3 space-y-3">
       <p className="rounded-lg bg-slate-900 px-4 py-3 text-base font-medium text-white">{homeHeadline(p, s)}</p>
@@ -200,15 +208,23 @@ function PeriodHeadline({ s, p }: { s: PeriodSummary; p: PeriodSummary }) {
               {/* 비용이 덜 채워져도 숫자는 크게, 미확정 표시는 작게 (입력된 비용만 반영한 값) */}
               <div className="mt-1 flex flex-wrap items-baseline gap-2">
                 <BigWon value={shownProfit.amount} className="text-2xl font-bold text-slate-900" />
-                {shownProfit.provisional && <span className="text-xs font-medium text-slate-500">미확정</span>}
+                {shownProfit.provisional && <span className="text-xs font-medium text-slate-500">{s.operatingProfit.salesGap ? '일부 확인' : '미확정'}</span>}
                 {!shownProfit.provisional && <BasisBadge calc={s.operatingProfit} />}
               </div>
-              {displayValue(p.operatingProfit) === null ? (
-                <DeltaText cmp={{ abs: null, pct: null, note: '비교 기간 데이터 필요' }} unit="won" />
+              {prevCmp === null || curCmp === null ? (
+                <DeltaText cmp={{ abs: null, pct: null, note: s.operatingProfit.salesGap || p.operatingProfit.salesGap ? GAP_NOTE : '비교 기간 데이터 필요' }} unit="won" />
               ) : (
-                <DeltaText cmp={compareValues(displayValue(p.operatingProfit)!, shownProfit.amount, 'profit')} unit="won" />
+                <DeltaText cmp={compareValues(prevCmp, curCmp, 'profit')} unit="won" />
               )}
-              {shownProfit.provisional && (
+              {gapCount > 0 && (
+                <p className="mt-1 text-sm text-amber-800">
+                  ⚠ 기록하지 않은 경로·날 {gapCount}곳 · 입력된 기록만 더한 값{' '}
+                  <button className="font-medium underline" onClick={() => navigate('sales', gapTarget(gaps[0]))}>
+                    기록 채우기
+                  </button>
+                </p>
+              )}
+              {shownProfit.provisional && missingCosts > 0 && (
                 <p className="mt-1 text-sm text-amber-800">
                   ⚠ 비용 {missingCosts}개 미입력 · 실제보다 높게 보일 수 있음{' '}
                   <button className="font-medium underline" onClick={() => navigate('sales')}>

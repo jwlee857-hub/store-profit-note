@@ -28,6 +28,7 @@ import {
   applicableCategories,
   coveredByPeriodCost,
   computeSummary,
+  discountDetailKnown,
   netSales,
   requiredCategories,
   routeHasPlatform,
@@ -125,7 +126,13 @@ function DailySales({ month, onMonth }: { month: MonthKey; onMonth: (m: MonthKey
   const [channel, setChannel] = useState<Channel | 'all'>('all');
   const [onlyIssues, setOnlyIssues] = useState(false);
   const [editing, setEditing] = useState<SalesEntry | null>(null);
-  const [quick, setQuick] = useState<QuickEntryProps | null>(route.params.quick === '1' ? { onClose: () => undefined } : null);
+  // 성과 확인·문제 진단의 '빠진 기록 채우기': 그 날·판매 방식·경로를 미리 고른 간편 입력으로 연다
+  const [quick, setQuick] = useState<QuickEntryProps | null>(() => {
+    const p = route.params;
+    if (p.quick !== '1') return null;
+    const ch = CHANNELS.includes(p.channel as Channel) ? (p.channel as Channel) : undefined;
+    return { onClose: () => undefined, ...(isValidDate(p.date ?? '') ? { date: p.date } : {}), ...(ch ? { channel: ch } : {}), ...(ch && p.route ? { routeId: p.route } : {}) };
+  });
   const [statusDate, setStatusDate] = useState(todayStr());
   // 보여줄 날짜 수는 달마다 7일부터 시작
   const [shown, setShown] = useState({ month, n: 7 });
@@ -142,6 +149,12 @@ function DailySales({ month, onMonth }: { month: MonthKey; onMonth: (m: MonthKey
     );
 
   // 홈 '추정값 확정하기'에서 넘어온 경우: 그 기간·경로·비용 항목이 아직 추정값인 기록만 보여준다
+  // 성과 확인의 '할인액 채우기': 그 기간·경로에서 할인액을 모르는(순매출만 입력한) 기록만 보여준다
+  const needDiscount = (() => {
+    const p = route.params;
+    if (p.need !== 'discount' || !p.from || !p.to || !p.route || !isValidDate(p.from) || !isValidDate(p.to) || !CHANNELS.includes(p.channel as Channel)) return null;
+    return { start: p.from, end: p.to, routeId: p.route, channel: p.channel as Channel };
+  })();
   const pending = (() => {
     const p = route.params;
     if (!p.from || !p.to || !p.route || !p.channel || !p.cats || !isValidDate(p.from) || !isValidDate(p.to) || !CHANNELS.includes(p.channel as Channel)) return null;
@@ -149,7 +162,13 @@ function DailySales({ month, onMonth }: { month: MonthKey; onMonth: (m: MonthKey
     if (!categories.length) return null;
     return { start: p.from, end: p.to, routeId: p.route, channel: p.channel as Channel, categories };
   })();
-  const pendingList = pending ? pendingEntries(data, pending) : null;
+  const pendingList = pending
+    ? pendingEntries(data, pending)
+    : needDiscount
+      ? data.sales
+          .filter((e) => e.routeId === needDiscount.routeId && e.channel === needDiscount.channel && e.date >= needDiscount.start && e.date <= needDiscount.end && netSales(e) !== null && !discountDetailKnown(e))
+          .sort((a, b) => b.date.localeCompare(a.date))
+      : null;
   const rows = (pendingList ?? data.sales.filter((e) => e.date >= range.start && e.date <= range.end && (channel === 'all' || e.channel === channel)))
     .map((e) => ({ e, st: entryStatus(e, data), net: netSales(e) }))
     .filter((r) => pendingList || !onlyIssues || !isCostDone(r.st.status))
@@ -164,7 +183,7 @@ function DailySales({ month, onMonth }: { month: MonthKey; onMonth: (m: MonthKey
 
   const afterSave = (saved: SalesEntry) => {
     // 확정 대기 목록에서 채우는 중이면 목록을 유지한다 (채운 기록은 목록에서 빠짐)
-    if (pending) return;
+    if (pending || needDiscount) return;
     // 저장한 입력이 목록에서 바로 보이도록: 다른 달이면 그 달로 이동하고 필터를 푼다
     const m = monthOf(saved.date);
     if (m !== month) onMonth(m);
@@ -204,6 +223,21 @@ function DailySales({ month, onMonth }: { month: MonthKey; onMonth: (m: MonthKey
       />
 
       <Card title="매출 기록" subtitle="날짜별로 묶어 보여줍니다. 비용 상태를 눌러 비용을 확인·보완하세요.">
+        {needDiscount && (
+          <Notice tone="warn" className="mb-3">
+            <p className="font-medium">
+              할인액 미입력: {needDiscount.start.slice(5).replace('-', '/')}~{needDiscount.end.slice(5).replace('-', '/')} {routeName(needDiscount.routeId)}({CHANNEL_LABEL[needDiscount.channel]})
+            </p>
+            <p className="mt-0.5 text-sm">
+              {pendingList!.length
+                ? `순매출만 입력해 가게 부담 할인액을 모르는 기록 ${pendingList!.length}건이에요. '비용 확인'을 눌러 정산서의 할인액(없으면 0원)을 넣으면 목록에서 빠져요. 순매출은 다시 빼지 않아요.`
+                : '이 기간의 할인액을 모두 채웠어요.'}
+            </p>
+            <Button size="sm" className="mt-2" onClick={() => navigate('sales', { tab: 'daily', month })}>
+              전체 기록 보기
+            </Button>
+          </Notice>
+        )}
         {pending && (
           <Notice tone="warn" className="mb-3">
             <p className="font-medium">

@@ -20,13 +20,14 @@ import {
   th,
   thR,
 } from '../components/ui';
-import { compareCalc, computeSummary, expectedProfitChange, getMetric, profitForDisplay, type PeriodSummary } from '../domain/calc';
+import { GAP_NOTE, channelSalesCalc, comparableValue, compareCalc, computeSummary, expectedProfitChange, getMetric, profitForDisplay, type PeriodSummary } from '../domain/calc';
+import { RecordGapsNotice } from '../components/RecordGaps';
 import { addDays, daysInclusive, formatRange, isValidRange, previousRange, todayStr } from '../domain/dates';
 import { couponText, fmt, fmtKpiTarget, fmtPp, fmtSigned, type Unit } from '../domain/format';
 import { KPI_MODE_LABEL, daysLeft, judgeKpiTarget, referenceDate, reviewUnavailableReason } from '../domain/periods';
 import { CHANNEL_LABEL, DECISION_LABEL, METRIC_DEFINITION, METRIC_META, STATUS_LABEL, easyMetricName, metricLabel, metricLabelEasy } from '../domain/labels';
 import { DiscountEfficiencyNote } from '../components/DiscountEfficiency';
-import { reviewContext } from '../domain/review';
+import { deliveryChangeText, reviewContext, type ReviewContext } from '../domain/review';
 import { CHANNELS, type Calc, type Channel, type DateRange, type Decision, type MetricRef, type Solution, type SolutionStatus } from '../domain/types';
 import { useApp, useData } from '../state/AppContext';
 
@@ -213,7 +214,7 @@ function PerformanceBody({ solution }: { solution: Solution }) {
         </>
       )}
 
-      {!unavailable && <Card title="결과 판단 기록">
+      {!unavailable && <Card title="결과 판단 기록" id="review-record">
         <div className="space-y-3">
           <div>
             <p className="mb-1 text-xs font-medium text-slate-700">판단</p>
@@ -332,7 +333,10 @@ function Comparisons({ solution, b, a }: { solution: Solution; b: PeriodSummary;
   const kpiMeta = METRIC_META[solution.kpi.key];
   const kpiAfter = getMetric(a, solution.kpi);
   const kpiBefore = getMetric(b, solution.kpi);
-  const judged = judgeKpiTarget(solution.kpiTargetMode, solution.kpiTarget, kpiBefore.value, kpiAfter.value, kpiMeta.higherIsBetter, a.businessDays);
+  const kpiGap = !!(kpiBefore.salesGap || kpiAfter.salesGap);
+  const judgedRaw = judgeKpiTarget(solution.kpiTargetMode, solution.kpiTarget, kpiBefore.value, kpiAfter.value, kpiMeta.higherIsBetter, a.businessDays);
+  // 빠진 기록이 있는 부분 합계로는 목표 달성을 판정하지 않는다
+  const judged = kpiGap && solution.kpiTarget !== null ? { achieved: null, actual: null, reason: '판정 보류 · 빠진 기록 있음' } : judgedRaw;
   const achieved = judged.achieved;
   const actualText =
     judged.actual === null
@@ -349,8 +353,12 @@ function Comparisons({ solution, b, a }: { solution: Solution; b: PeriodSummary;
 
   const opB = b.operatingProfit;
   const opA = a.operatingProfit;
-  const scopeSalesUp = ch !== 'all' && a.channels[ch].netSales > b.channels[ch].netSales;
-  const otherDown = ch !== 'all' ? CHANNELS.filter((c) => c !== ch && a.channels[c].netSales < b.channels[c].netSales) : [];
+  // 매출 비교는 빠진 기록이 없는 판매 방식끼리만
+  const salesOf = (x: PeriodSummary, c: Channel) => channelSalesCalc(x.channels[c]).value;
+  const salesUp = (c: Channel) => salesOf(a, c) !== null && salesOf(b, c) !== null && salesOf(a, c)! > salesOf(b, c)!;
+  const salesDown = (c: Channel) => salesOf(a, c) !== null && salesOf(b, c) !== null && salesOf(a, c)! < salesOf(b, c)!;
+  const scopeSalesUp = ch !== 'all' && salesUp(ch);
+  const otherDown = ch !== 'all' ? CHANNELS.filter((c) => c !== ch && salesDown(c)) : [];
   const opDown = opB.value !== null && opA.value !== null && opA.value < opB.value;
 
   const caveats: string[] = [];
@@ -442,13 +450,18 @@ function Comparisons({ solution, b, a }: { solution: Solution; b: PeriodSummary;
   const expected = expectedProfitChange(solution.expectedRevenueChange, solution.expectedCostChange, solution.budget, solution.budgetIncludedInCost);
   const dB = profitForDisplay(opB);
   const dA = profitForDisplay(opA);
-  const actual = dB.amount !== null && dA.amount !== null ? dA.amount - dB.amount : null;
+  const cB = comparableValue(opB);
+  const cA = comparableValue(opA);
+  const actual = cB !== null && cA !== null ? cA - cB : null;
+  const actualGap = !!(opB.salesGap || opA.salesGap);
   const actualProvisional = dB.provisional || dA.provisional;
   const planDays = solution.start && solution.end && solution.start <= solution.end ? daysInclusive(solution.start, solution.end) : null;
   const ctx = reviewContext(b, a, ch);
 
   return (
     <>
+      <RecordGapsNotice periods={[['실행 전', b], ['실행 후', a]]} />
+      {ch === 'delivery' && <CouponDecisionSummary solution={solution} b={b} a={a} ctx={ctx} />}
       <Card title="영업이익 변화: 예상과 실제" subtitle="예상은 계획할 때 적은 값, 실제는 실행 후 기간 − 실행 전 기간의 가게 전체 영업이익입니다.">
         <div className="grid grid-cols-2 gap-3">
           <div className="rounded-lg bg-slate-50 p-3">
@@ -460,13 +473,14 @@ function Comparisons({ solution, b, a }: { solution: Solution; b: PeriodSummary;
             <div className="text-sm text-slate-600">실제 (실행 후 − 실행 전)</div>
             <div className="mt-1 flex flex-wrap items-baseline gap-x-2">
               <span className={`text-xl font-bold ${actual === null ? 'text-slate-500' : actual >= 0 ? 'text-emerald-700' : 'text-red-700'}`}>
-                {actual === null ? '계산 불가' : <BigWon value={actual} signed />}
+                {actual === null ? (actualGap ? '비교 보류' : '계산 불가') : <BigWon value={actual} signed />}
               </span>
               {actual !== null && actualProvisional && <span className="text-xs font-medium text-slate-500">미확정</span>}
             </div>
             <div className="text-xs text-slate-600">
               실행 전 {b.calendarDays}일(영업 {b.businessDays}일) · 실행 후 {a.calendarDays}일(영업 {a.businessDays}일)
             </div>
+            {actualGap && <div className="text-xs text-amber-800">빠진 매출 기록이 있어 부분 합계끼리 빼지 않았어요.</div>}
           </div>
         </div>
         {ctx.businessDaysDiffer && (
@@ -487,11 +501,11 @@ function Comparisons({ solution, b, a }: { solution: Solution; b: PeriodSummary;
                   <dd className="mt-0.5 grid grid-cols-3 gap-1 text-sm tabular">
                     <span className="min-w-0">
                       <span className="block text-xs text-slate-600">실행 전</span>
-                      {fmt(v.before, 'won', '계산 불가')}
+                      {fmt(v.before, 'won', b.totalSales.salesGap ? '비교 보류' : '계산 불가')}
                     </span>
                     <span className="min-w-0">
                       <span className="block text-xs text-slate-600">실행 후</span>
-                      {fmt(v.after, 'won', '계산 불가')}
+                      {fmt(v.after, 'won', a.totalSales.salesGap ? '비교 보류' : '계산 불가')}
                     </span>
                     <span className="min-w-0">
                       <span className="block text-xs text-slate-600">하루 변화</span>
@@ -627,9 +641,15 @@ function Comparisons({ solution, b, a }: { solution: Solution; b: PeriodSummary;
                   {CHANNEL_LABEL[c]}
                   {c === ch && ' (대상)'}
                 </td>
-                <td className={tdR}>{fmt(b.channels[c].netSales, 'won')}</td>
-                <td className={tdR}>{fmt(a.channels[c].netSales, 'won')}</td>
-                <td className={tdR}>{fmtSigned(a.channels[c].netSales - b.channels[c].netSales, 'won')}</td>
+                <td className={tdR}>
+                  <CalcValue calc={channelSalesCalc(b.channels[c])} unit="won" />
+                </td>
+                <td className={tdR}>
+                  <CalcValue calc={channelSalesCalc(a.channels[c])} unit="won" />
+                </td>
+                <td className={tdR}>
+                  <DeltaText cmp={compareCalc(channelSalesCalc(b.channels[c]), channelSalesCalc(a.channels[c]))} unit="won" />
+                </td>
                 <td className={tdR}>
                   <DeltaText cmp={compareCalc(b.channels[c].directProfit, a.channels[c].directProfit, 'profit')} unit="won" />
                 </td>
@@ -649,5 +669,100 @@ function Comparisons({ solution, b, a }: { solution: Solution; b: PeriodSummary;
         )}
       </Card>
     </>
+  );
+}
+
+/**
+ * 배달 대상 계획의 첫 화면: 다음 쿠폰을 정할 때 보는 세 숫자와 해석에 필요한 맥락.
+ * 전후 차이일 뿐 쿠폰 효과로 단정하지 않는다.
+ */
+function CouponDecisionSummary({ solution, b, a, ctx }: { solution: Solution; b: PeriodSummary; a: PeriodSummary; ctx: ReviewContext }) {
+  const three: { n: string; label: string; ref: MetricRef; kind: 'normal' | 'profit' }[] = [
+    { n: '①', label: '배달 한 건당 남은 돈', ref: { key: 'directProfitPerOrder', channel: 'delivery' }, kind: 'normal' },
+    { n: '②', label: '배달 전체에서 남은 돈', ref: { key: 'directProfit', channel: 'delivery' }, kind: 'profit' },
+    { n: '③', label: '가게 전체 영업이익', ref: { key: 'operatingProfit', channel: 'all' }, kind: 'profit' },
+  ];
+  const ordersRef: MetricRef = { key: 'orders', channel: 'delivery' };
+  const pair = (r: MetricRef) => [getMetric(b, r), getMetric(a, r)] as const;
+  const [perB, perA] = pair(three[0].ref);
+  const [totB, totA] = pair(three[1].ref);
+  const [ordB, ordA] = pair(ordersRef);
+  const nums = [perB, perA, totB, totA, ordB, ordA].map(comparableValue);
+  // 주문 수가 모든 날에 있어야(건당 값이 계산된 기준과 같아야) 문장으로 묶는다
+  const sentence = nums.every((v) => v !== null) && !ordB.basis && !ordA.basis ? deliveryChangeText([nums[0]!, nums[1]!], [nums[4]!, nums[5]!], [nums[2]!, nums[3]!]) : null;
+  const others = (['hall', 'takeout'] as Channel[]).filter((c) => b.channels[c].entryCount || a.channels[c].entryCount);
+  const goReview = () => {
+    const el = document.getElementById('review-record');
+    el?.scrollIntoView?.({ behavior: 'smooth', block: 'start' });
+    (el?.querySelector('input,textarea,button') as HTMLElement | null)?.focus();
+  };
+  const cell = (r: MetricRef, kind: 'normal' | 'profit', unit: Unit) => {
+    const [x, y] = pair(r);
+    return (
+      <>
+        <div className="mt-1 flex flex-wrap items-baseline gap-x-1.5 gap-y-0.5 text-sm">
+          <CalcValue calc={x} unit={unit} />
+          <span aria-hidden className="text-slate-400">→</span>
+          <span className="sr-only">에서</span>
+          <CalcValue calc={y} unit={unit} />
+        </div>
+        <DeltaText cmp={compareCalc(x, y, kind)} unit={unit} higherIsBetter={METRIC_META[r.key].higherIsBetter} />
+      </>
+    );
+  };
+  return (
+    <Card
+      title="다음 쿠폰을 정할 때 볼 세 숫자"
+      subtitle={`실행 전 ${formatRange(b.range)} → 실행 후 ${formatRange(a.range)}${couponText(solution.coupon) ? ` · ${couponText(solution.coupon)}` : ''}`}
+      actions={
+        <Button size="sm" variant="primary" onClick={goReview}>
+          결과 판단 기록하기
+        </Button>
+      }
+    >
+      <div aria-label="쿠폰 결정 세 지표" className="grid gap-2 sm:grid-cols-3">
+        {three.map((m) => (
+          <div key={m.n} className="min-w-0 rounded-lg bg-slate-50 p-3 ring-1 ring-slate-200">
+            <div className="text-sm font-semibold text-slate-900">
+              {m.n} {m.label}
+            </div>
+            {cell(m.ref, m.kind, 'won')}
+          </div>
+        ))}
+      </div>
+      {sentence && <p className="mt-3 text-base font-medium text-slate-900">{sentence}</p>}
+      <p className="mt-1 text-xs text-slate-600">
+        ①·②는 배달 매출에서 배달 직접 비용(식재료·수수료·배달비·포장비 등)만 뺀 금액, ③은 월세·인건비 같은 공통비까지 뺀 가게 전체 금액이에요. 실행 전후 차이라 날씨·노출·다른 판매 방식 변화가 섞여 있어 쿠폰 때문이라고 단정할 수 없어요.
+      </p>
+      <dl aria-label="해석에 필요한 맥락" className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-4">
+        <div className="min-w-0 rounded-lg p-2.5 ring-1 ring-slate-200">
+          <dt className="text-xs font-medium text-slate-600">배달 완료 주문 수</dt>
+          <dd>{cell(ordersRef, 'normal', 'orders')}</dd>
+        </div>
+        <div className="min-w-0 rounded-lg p-2.5 ring-1 ring-slate-200">
+          <dt className="text-xs font-medium text-slate-600">가게 부담 할인액 (배달)</dt>
+          <dd>{cell({ key: 'storeDiscount', channel: 'delivery' }, 'normal', 'won')}</dd>
+        </div>
+        <div className="min-w-0 rounded-lg p-2.5 ring-1 ring-slate-200">
+          <dt className="text-xs font-medium text-slate-600">실제 영업일 수</dt>
+          <dd className="mt-1 text-sm tabular">
+            {b.businessDays}일 → {a.businessDays}일
+            {ctx.businessDaysDiffer && <span className="block text-xs text-amber-800">하루 평균으로도 비교하세요</span>}
+          </dd>
+        </div>
+        <div className="min-w-0 rounded-lg p-2.5 ring-1 ring-slate-200">
+          <dt className="text-xs font-medium text-slate-600">홀·포장 변화</dt>
+          <dd className="mt-1 text-sm">
+            {!others.length
+              ? '기록 없음'
+              : ctx.outweighing.length
+                ? <span className="text-amber-800">{ctx.outweighing.map((c) => `${CHANNEL_LABEL[c]} ${manText(ctx.channelDelta[c]!, true)}`).join(', ')} — 배달 변화보다 커요</span>
+                : others.some((c) => ctx.gapChannels.includes(c))
+                  ? <span className="text-slate-600">{others.filter((c) => ctx.gapChannels.includes(c)).map((c) => CHANNEL_LABEL[c]).join('·')} {GAP_NOTE}</span>
+                  : '배달 변화보다 큰 변화 없음'}
+          </dd>
+        </div>
+      </dl>
+    </Card>
   );
 }

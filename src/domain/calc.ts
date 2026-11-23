@@ -158,6 +158,76 @@ export function unrecordedDays(data: Pick<AppData, 'store' | 'dayOverrides' | 's
   return eachDay(range).filter((d) => !recorded.has(d) && isOpenDay(data, d));
 }
 
+// ───────────────────────── 입력 현황 (홈과 같은 기준) ─────────────────────────
+
+export interface SalesSlot {
+  channel: Channel;
+  routeId: string;
+  label: string;
+}
+
+const CHANNEL_NAME: Record<Channel, string> = { hall: '홀', delivery: '배달', takeout: '포장' };
+
+/** 가게가 운영하는 채널 × 그 채널에 연결된 주문 경로 (홈 입력 현황·성과 비교가 같은 목록을 쓴다) */
+export function salesSlots(data: Pick<AppData, 'store' | 'routes'>): SalesSlot[] {
+  const out: SalesSlot[] = [];
+  for (const ch of data.store?.channels ?? []) {
+    // 경로 이름만으로는 판매 방식을 알 수 없는 경우가 많아(예: 전화 주문 = 포장) 항상 판매 방식을 붙인다
+    for (const r of data.routes.filter((r) => r.channels.includes(ch))) out.push({ channel: ch, routeId: r.id, label: `${r.name} · ${CHANNEL_NAME[ch]}` });
+  }
+  return out;
+}
+
+/**
+ * 기간 안 판매 방식별 매출 입력 현황
+ * - notUsed: 운영하지 않는 판매 방식(경로 없음)이고 기록도 없음
+ * - none: 미입력 — 영업일에 기록·'매출 없음' 확인이 하나도 없음
+ * - partial: 일부 확인 — 일부 경로·날만 입력·확인
+ * - zero: 0원 확인 — 빠진 곳 없이 '매출 없음' 확인·휴업뿐
+ * - complete: 전부 확인
+ */
+export type CoverageState = 'notUsed' | 'none' | 'partial' | 'zero' | 'complete';
+
+export const COVERAGE_LABEL: Record<CoverageState, string> = { notUsed: '운영 안 함', none: '미입력', partial: '일부 확인', zero: '0원 확인', complete: '전부 확인' };
+
+export interface Coverage {
+  state: CoverageState;
+  /** 영업일인데 기록도 '매출 없음' 확인도 없는 경로·날 */
+  missing: { date: DateStr; routeId: string }[];
+}
+
+/**
+ * 홈의 날짜별 입력 현황(dayInputStatus)과 같은 판정: 기록이 있거나 '매출 없음'으로 확인한 경로는 확인됨,
+ * 휴업일의 빈 경로는 빠진 것이 아님, 그 밖의 영업일 빈 경로는 미입력.
+ * 가게 설정이 없는 이전 데이터는 경로 목록을 알 수 없으므로 기록이 있으면 전부 확인으로 본다(판정을 바꾸지 않음).
+ */
+export function channelCoverage(
+  data: Pick<AppData, 'store' | 'routes' | 'dayOverrides' | 'sales'> & { salesChecks?: AppData['salesChecks'] },
+  channel: Channel,
+  days: readonly DateStr[],
+): Coverage {
+  const slots = salesSlots(data).filter((s) => s.channel === channel);
+  const daySet = new Set(days);
+  const entered = new Set<string>();
+  for (const e of data.sales) if (e.channel === channel && daySet.has(e.date)) entered.add(`${e.date}|${e.routeId}`);
+  const checked = new Set<string>();
+  for (const c of data.salesChecks ?? []) if (c.channel === channel && c.status === 'noSales' && daySet.has(c.date)) checked.add(`${c.date}|${c.routeId}`);
+  if (!slots.length) return { state: entered.size ? 'complete' : 'notUsed', missing: [] };
+  const missing: Coverage['missing'] = [];
+  for (const d of days) {
+    const open = isOpenDay(data, d);
+    for (const s of slots) {
+      const k = `${d}|${s.routeId}`;
+      if (!entered.has(k) && !checked.has(k) && open) missing.push({ date: d, routeId: s.routeId });
+    }
+  }
+  const state: CoverageState = missing.length ? (entered.size || checked.size ? 'partial' : 'none') : entered.size ? 'complete' : 'zero';
+  return { state, missing };
+}
+
+/** 매출 합계를 완전한 실적으로 쓸 수 있는가 (빠진 경로·날도, 금액이 빈 기록도 없음) */
+export const salesComplete = (c: Pick<ChannelSummary, 'coverage' | 'salesMissing'>) => c.coverage.state !== 'none' && c.coverage.state !== 'partial' && c.salesMissing === 0;
+
 // ───────────────────────── 기간 요약 ─────────────────────────
 
 /**
@@ -219,6 +289,8 @@ export interface ChannelSummary {
   costPerOrder: Calc;
   directProfitPerOrder: Calc;
   costRate: Calc;
+  /** 매출 입력 현황 (홈과 같은 기준) */
+  coverage: Coverage;
 }
 
 export interface CostBreakdownRow {
@@ -281,9 +353,10 @@ function basisFlags(b: Pick<CostBucket, 'calculated' | 'estimated'>): Pick<Calc,
   return { estimated: b.estimated > 0, calculated: b.estimated <= 0 && b.calculated > 0 };
 }
 
-/** 금액 계산 결과에 비용 완결성 상태를 붙인다 */
-function withCompleteness(amount: number, missing: number, flags: Pick<Calc, 'estimated' | 'calculated'>, hasData: boolean): Calc {
-  if (!hasData) return { value: null, reason: 'noData' };
+/** 금액 계산 결과에 비용 완결성 상태를 붙인다. salesGap: 매출 기록이 빠져 부분 합계 */
+function withCompleteness(amount: number, missing: number, flags: Pick<Calc, 'estimated' | 'calculated'>, hasData: boolean, salesGap = false): Calc {
+  if (!hasData) return salesGap ? { value: null, reason: 'noData', salesGap, note: '미입력' } : { value: null, reason: 'noData' };
+  if (salesGap) return { value: null, reason: 'incomplete', provisional: amount, salesGap };
   if (missing > 0) return { value: null, reason: 'incomplete', provisional: amount };
   return { value: amount, ...flags };
 }
@@ -292,8 +365,9 @@ function divCalc(num: Calc, den: number | null, scale = 1): Calc {
   if (num.value === null) {
     if (num.reason === 'incomplete') {
       const r = div(num.provisional ?? 0, den, scale);
-      return { value: null, reason: 'incomplete', provisional: r.value };
+      return { value: null, reason: 'incomplete', provisional: r.value, ...(num.salesGap ? { salesGap: true } : {}) };
     }
+    if (num.salesGap) return { value: null, reason: num.reason ?? 'noData', salesGap: true, note: num.note };
     return { value: null, reason: num.reason ?? 'noData' };
   }
   const r = div(num.value, den, scale);
@@ -353,7 +427,7 @@ export function computeSummary(data: AppData, range: DateRange, pairedExcluded: 
       if (arr) arr.push(e);
       else byDay.set(e.date, [e]);
     }
-    const coverage = (pick: (e: SalesEntry) => number | null) => {
+    const dayCoverage = (pick: (e: SalesEntry) => number | null) => {
       let sum = 0;
       let net = 0;
       let n = 0;
@@ -367,8 +441,8 @@ export function computeSummary(data: AppData, range: DateRange, pairedExcluded: 
       }
       return { sum, net, days: n };
     };
-    const oc = coverage((e) => e.orders);
-    const vc = ch === 'hall' ? coverage((e) => e.visitors) : { sum: 0, net: 0, days: 0 };
+    const oc = dayCoverage((e) => e.orders);
+    const vc = ch === 'hall' ? dayCoverage((e) => e.visitors) : { sum: 0, net: 0, days: 0 };
     const entryDays = byDay.size;
     const orders: number | null = oc.days ? oc.sum : null;
     const visitors: number | null = ch === 'hall' && vc.days ? vc.sum : null;
@@ -426,9 +500,13 @@ export function computeSummary(data: AppData, range: DateRange, pairedExcluded: 
     estimatedAmount += bucket.estimated;
 
     const hasData = list.length > 0;
+    const coverage = channelCoverage(data, ch, days);
+    const routeName = (id: string) => data.routes.find((r) => r.id === id)?.name ?? '(삭제된 경로)';
+    for (const m of coverage.missing) missing.push({ kind: 'sales', label: `${m.date} ${routeName(m.routeId)} ${CHANNEL_LABEL[ch]} 매출 미입력` });
+    const gap = !salesComplete({ coverage, salesMissing });
     const knownCost = bucketTotal(bucket);
-    const directCostCalc = withCompleteness(knownCost, bucket.missing, basisFlags(bucket), hasData);
-    const directProfit = withCompleteness(net - knownCost, bucket.missing + salesMissing, basisFlags(bucket), hasData);
+    const directCostCalc = withCompleteness(knownCost, bucket.missing, basisFlags(bucket), hasData, gap);
+    const directProfit = withCompleteness(net - knownCost, bucket.missing + salesMissing, basisFlags(bucket), hasData, gap);
     const salesBase: number | null = hasData && salesMissing === 0 ? net : null;
 
     // 객단가·평균 주문금액: 수량이 있는 날의 매출 ÷ 그날들의 수량
@@ -461,6 +539,7 @@ export function computeSummary(data: AppData, range: DateRange, pairedExcluded: 
       costPerOrder: hasData ? divCalc(directCostCalc, ordersAll) : { value: null, reason: 'noData' },
       directProfitPerOrder: hasData ? divCalc(directProfit, ordersAll) : { value: null, reason: 'noData' },
       costRate: hasData ? divCalc(directCostCalc, salesBase, 100) : { value: null, reason: 'noData' },
+      coverage,
     };
   }
 
@@ -506,23 +585,26 @@ export function computeSummary(data: AppData, range: DateRange, pairedExcluded: 
   const salesMissingTotal = CHANNELS.reduce((s, c) => s + channels[c].salesMissing, 0);
   const totalNet = CHANNELS.reduce((s, c) => s + channels[c].netSales, 0);
   const totalGross = CHANNELS.reduce((s, c) => s + channels[c].gross, 0);
+  // 운영하는 판매 방식 중 하나라도 기록이 빠졌으면 가게 전체 합계는 부분 합계다
+  const salesGap = CHANNELS.some((c) => !salesComplete(channels[c]));
   const totalSales: Calc = !hasData
-    ? { value: null, reason: 'noData' }
-    : salesMissingTotal > 0
-      ? { value: null, reason: 'incomplete', provisional: totalNet }
+    ? salesGap ? { value: null, reason: 'noData', salesGap, note: '미입력' } : { value: null, reason: 'noData' }
+    : salesGap
+      ? { value: null, reason: 'incomplete', provisional: totalNet, salesGap }
       : { value: totalNet };
 
   const directMissing = CHANNELS.reduce((s, c) => s + channels[c].directCost.missing, 0);
   const directKnown = CHANNELS.reduce((s, c) => s + bucketTotal(channels[c].directCost), 0);
   // 근거 표시는 기존 규칙과 같이 기간 전체 비용(판매 방식 비용 + 공통 운영비) 기준으로 판단한다
   const allFlags = basisFlags({ calculated: calculatedAmount, estimated: estimatedAmount });
-  const directProfitTotal = withCompleteness(totalNet - directKnown, directMissing + salesMissingTotal, allFlags, hasData);
+  const directProfitTotal = withCompleteness(totalNet - directKnown, directMissing + salesMissingTotal, allFlags, hasData, salesGap);
   const commonKnown = bucketTotal(commonCost);
   const operatingProfit = withCompleteness(
     totalNet - directKnown - commonKnown,
     directMissing + salesMissingTotal + commonCost.missing,
     allFlags,
     hasData,
+    salesGap,
   );
   const operatingMargin = divCalc(operatingProfit, totalSales.value ?? (hasData ? totalNet : null), 100);
 
@@ -535,7 +617,8 @@ export function computeSummary(data: AppData, range: DateRange, pairedExcluded: 
       weekdayCounts[weekday(d)]++;
     }
   }
-  const salesPerBusinessDay = totalSales.value === null ? { ...totalSales, provisional: null } : div(totalSales.value, businessDays);
+  const salesPerBusinessDay: Calc =
+    totalSales.value === null ? { ...totalSales, provisional: null, ...(totalSales.salesGap ? { note: '기록 일부 미입력' } : {}) } : div(totalSales.value, businessDays);
 
   // 일별 추이
   const daily: DailyRow[] = allDays.map((d) => {
@@ -618,9 +701,10 @@ export function quantityCalc(cs: ChannelSummary, kind: 'orders' | 'visitors'): C
   return withBasis({ value: v }, kind === 'visitors' ? cs.visitorsDays : cs.ordersDays, cs.entryDays);
 }
 
-/** "23일 중 22일 기준" */
+/** "23일 중 22일 기준" · 기록 단위면 "매출 기록 10건 중 8건 확인" (주문 건수가 아님) */
 export function basisText(b: CalcBasis | undefined | null): string | null {
-  return b && b.used < b.total ? `${b.total}${b.unit} 중 ${b.used}${b.unit} 기준` : null;
+  if (!b || b.used >= b.total) return null;
+  return b.unit === '건' ? `매출 기록 ${b.total}건 중 ${b.used}건 확인` : `${b.total}${b.unit} 중 ${b.used}${b.unit} 기준`;
 }
 
 // ───────────────────────── 화면 표시용 ─────────────────────────
@@ -638,6 +722,16 @@ export function profitForDisplay(c: Calc): { amount: number | null; provisional:
 export function displayValue(c: Calc): number | null {
   return profitForDisplay(c).amount;
 }
+
+/**
+ * 증감·판정에 쓸 수 있는 값: 확정값, 또는 비용 일부 미입력인 잠정값('미확정' 표시).
+ * 매출·할인 기록이 빠진 부분 합계(salesGap)는 완전한 실적이 아니므로 null.
+ */
+export function comparableValue(c: Calc): number | null {
+  return c.salesGap ? null : displayValue(c);
+}
+
+export const GAP_NOTE = '비교 보류 · 빠진 기록 있음';
 
 /** 영업이익을 미확정으로 만드는 미입력 비용 개수 (매출 금액 미입력은 제외) */
 export function missingCostCount(s: Pick<PeriodSummary, 'status'>): number {
@@ -659,6 +753,7 @@ export interface Comparison {
  * - kind='ratio': 차이를 %p로 해석, 증감률 없음
  */
 export function compareCalc(prev: Calc, cur: Calc, kind: 'normal' | 'profit' | 'ratio' = 'normal'): Comparison {
+  if (prev.salesGap || cur.salesGap) return { abs: null, pct: null, note: GAP_NOTE };
   if (prev.value === null || cur.value === null) return { abs: null, pct: null, note: '비교 불가 (데이터 필요)' };
   return compareValues(prev.value, cur.value, kind);
 }
@@ -702,10 +797,12 @@ export function getMetric(s: PeriodSummary, ref: MetricRef): Calc {
       return s.salesPerBusinessDay;
     case 'netSales':
       if (ch === 'all') return s.totalSales;
-      return s.channels[ch].entryCount ? { value: s.channels[ch].netSales } : { value: null, reason: 'noData' };
+      return channelSalesCalc(s.channels[ch]);
     case 'orders': {
-      if (ch !== 'all') return quantityCalc(s.channels[ch], 'orders');
+      if (ch !== 'all') return withGap(quantityCalc(s.channels[ch], 'orders'), s.channels[ch]);
       const v = allOrders();
+      const gap = CHANNELS.some((c) => !salesComplete(s.channels[c]));
+      if (gap) return v === null ? { value: null, reason: 'noData', salesGap: true } : { value: null, reason: 'incomplete', provisional: v, salesGap: true };
       return v === null ? { value: null, reason: 'noData' } : { value: v };
     }
     case 'visitors':
@@ -721,25 +818,48 @@ export function getMetric(s: PeriodSummary, ref: MetricRef): Calc {
     case 'directProfitPerOrder':
       if (ch === 'all') return divCalc(s.directProfitTotal, allOrders());
       return s.channels[ch].directProfitPerOrder;
-    case 'storeDiscount': {
-      if (ch !== 'all') return discountCalc(s.channels[ch]);
-      const parts = CHANNELS.map((c) => s.channels[c]).filter((c) => c.entryCount > 0);
-      if (!parts.length) return { value: null, reason: 'noData' };
-      const used = parts.reduce((n, c) => n + c.entryCount - c.salesMissing - c.detailMissing, 0);
-      const total = parts.reduce((n, c) => n + c.entryCount - c.salesMissing, 0);
-      return withBasis({ value: parts.reduce((n, c) => n + c.discount, 0) }, used, total, '건');
-    }
+    case 'storeDiscount':
+      return discountCalcOf(ch === 'all' ? CHANNELS.map((c) => s.channels[c]) : [s.channels[ch]]);
   }
 }
 
+/** 판매 방식 매출: 미입력 / 일부 확인(부분 합계) / 0원 확인 / 전부 확인 */
+export function channelSalesCalc(cs: ChannelSummary): Calc {
+  if (cs.coverage.state === 'zero' && !cs.entryCount) return { value: 0 };
+  if (!cs.entryCount) return cs.coverage.state === 'none' ? { value: null, reason: 'noData', salesGap: true, note: '미입력' } : { value: null, reason: 'noData' };
+  if (!salesComplete(cs)) return { value: null, reason: 'incomplete', provisional: cs.netSales, salesGap: true };
+  return { value: cs.netSales };
+}
+
+/** 합계 수량 지표에 매출 기록 누락을 반영한다 (빠진 경로의 주문 수는 알 수 없음) */
+function withGap(c: Calc, cs: ChannelSummary): Calc {
+  if (salesComplete(cs)) return c;
+  if (c.value === null) return { ...c, salesGap: true, ...(cs.coverage.state === 'none' ? { note: '미입력' } : {}) };
+  return { value: null, reason: 'incomplete', provisional: c.value, salesGap: true, basis: c.basis };
+}
+
 /**
- * 가게 부담 할인액(원). 할인·환불 상세가 있는 기록만 더한 값이며,
- * 상세 없이 순매출만 입력한 기록이 있으면 "N건 중 M건 기준"을 붙인다(그 기록의 할인은 알 수 없음, 0원으로 보지 않음).
+ * 가게 부담 할인액(원). 할인 금액을 확인한 매출 기록만 더한다(모르는 할인을 0원으로 보지 않음).
+ * - 확인한 기록 0건: '할인액 미입력'
+ * - 일부만 확인(또는 매출 기록이 빠진 경로·날이 있음): 확인된 할인 합계(부분 합계) + '매출 기록 N건 중 M건 확인'
+ * - 직접 0원을 입력했거나 '매출 없음'으로 확인한 경우 0원은 정상 집계
  */
 export function discountCalc(cs: ChannelSummary): Calc {
-  if (!cs.entryCount) return { value: null, reason: 'noData' };
-  const total = cs.entryCount - cs.salesMissing;
-  return withBasis({ value: cs.discount }, total - cs.detailMissing, total, '건');
+  return discountCalcOf([cs]);
+}
+
+function discountCalcOf(list: ChannelSummary[]): Calc {
+  const used = list.filter((c) => c.coverage.state !== 'notUsed' || c.entryCount);
+  const records = used.reduce((n, c) => n + c.entryCount, 0);
+  const known = used.reduce((n, c) => n + c.entryCount - c.salesMissing - c.detailMissing, 0);
+  const sum = used.reduce((n, c) => n + c.discount, 0);
+  const slotGap = used.some((c) => c.coverage.state === 'none' || c.coverage.state === 'partial');
+  if (!used.length) return { value: null, reason: 'noData' };
+  if (!records) return slotGap ? { value: null, reason: 'noData', salesGap: true, note: '할인액 미입력' } : { value: 0 };
+  const basis: CalcBasis = { used: known, total: records, unit: '건' };
+  if (!known) return { value: null, reason: 'noData', salesGap: true, note: '할인액 미입력', basis };
+  if (known < records || slotGap) return { value: null, reason: 'incomplete', provisional: sum, salesGap: true, note: '확인된 할인 합계', basis };
+  return { value: sum };
 }
 
 /** 채널의 수량 지표: 홀은 방문 고객 수, 배달·포장은 완료 주문 수 */

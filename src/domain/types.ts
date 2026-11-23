@@ -432,6 +432,13 @@ export interface Calc {
   provisional?: number | null;
   /** 선택 입력 항목이 일부 날짜에만 있을 때: 값이 있는 날만으로 계산했음을 표시 (예: 23일 중 22일 기준) */
   basis?: CalcBasis;
+  /**
+   * 매출·할인 기록이 일부 빠져 provisional이 부분 합계일 뿐인 경우.
+   * 비용 미입력(잠정값)과 달리 이 값으로 증감·판정을 하지 않는다 (comparableValue 참고)
+   */
+  salesGap?: boolean;
+  /** value가 없을 때 '데이터 필요' 대신 보여줄 짧은 문구 (예: 할인액 미입력) 또는 부분 합계의 이름 (예: 확인된 할인 합계) */
+  note?: string;
 }
 
 export interface CalcBasis {

@@ -24,7 +24,8 @@ import {
   th,
   thR,
 } from '../components/ui';
-import { compareValues, expectedProfitChange } from '../domain/calc';
+import { GAP_NOTE, channelSalesCalc, compareValues, expectedProfitChange } from '../domain/calc';
+import { RecordGapsNotice } from '../components/RecordGaps';
 import { WEEKDAY_LABELS, formatRange, isValidRange, previousRange, todayStr } from '../domain/dates';
 import { ImpactNote, ImpactTag, RelatedCauses } from '../components/RelatedCauses';
 import { DiscountEfficiencyNote } from '../components/DiscountEfficiency';
@@ -285,6 +286,7 @@ function ProblemView({ problem, onEdit, onDelete }: { problem: Problem; onEdit: 
         <Notice tone="error">기간 설정이 올바르지 않습니다. 문제를 수정하세요.</Notice>
       ) : (
         <>
+          <RecordGapsNotice periods={[['비교 기간', dx.prev], ['분석 기간', dx.cur]]} />
           <TopFindings dx={dx} problem={problem} focus={route.params.finding} />
           {dx.caveats.length > 0 && (
             <Notice tone="warn">
@@ -347,6 +349,27 @@ function Step1({ dx }: { dx: DiagnosisResult }) {
         <tbody>
           {dx.channelChanges.map((r) => {
             const c = compareValues(r.prev, r.cur);
+            // 빠진 기록이 있는 판매 방식: 부분 합계와 입력 현황만 보여주고 증감은 계산하지 않는다 (성과 확인과 같은 기준)
+            if (r.gap)
+              return (
+                <tr key={r.channel}>
+                  <td className={td}>
+                    <span className="inline-flex items-center gap-1.5">
+                      <ChannelDot color={CHANNEL_COLOR[r.channel]} />
+                      {CHANNEL_LABEL[r.channel]}
+                    </span>
+                  </td>
+                  <td className={tdR}>
+                    <CalcValue calc={channelSalesCalc(dx.prev.channels[r.channel])} unit="won" />
+                  </td>
+                  <td className={tdR}>
+                    <CalcValue calc={channelSalesCalc(dx.cur.channels[r.channel])} unit="won" />
+                  </td>
+                  <td className={tdR} colSpan={dx.offsetting ? 2 : 3}>
+                    <span className="text-xs text-slate-500">{GAP_NOTE}</span>
+                  </td>
+                </tr>
+              );
             return (
               <tr key={r.channel}>
                 <td className={td}>
@@ -367,7 +390,7 @@ function Step1({ dx }: { dx: DiagnosisResult }) {
             <td className={td}>전체</td>
             <td className={tdR}>{fmt(dx.channelChanges.reduce((s, r) => s + r.prev, 0), 'won')}</td>
             <td className={tdR}>{fmt(dx.channelChanges.reduce((s, r) => s + r.cur, 0), 'won')}</td>
-            <td className={tdR}>{fmtSigned(dx.totalDelta, 'won')}</td>
+            <td className={tdR}>{dx.totalDelta === null ? <span className="text-xs font-normal text-slate-500">{GAP_NOTE}</span> : fmtSigned(dx.totalDelta, 'won')}</td>
             <td className={tdR}></td>
             {!dx.offsetting && <td className={tdR}>100%</td>}
           </tr>
