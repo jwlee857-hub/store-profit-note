@@ -6,12 +6,12 @@ import { recordGaps, type RecordGap } from '../domain/review';
 import { useApp, useData } from '../state/AppContext';
 import { Button, Notice } from './ui';
 
-/** 빠진 기록으로 이동: 매출 미입력은 그 날·경로의 간편 입력, 할인 미입력은 그 기간·경로의 기록 목록 */
+/** 빠진 기록으로 이동: 매출 미입력은 그 날·경로의 간편 입력, 할인 미입력은 그 배달앱·기간의 정산 반영 화면 */
 export function gapTarget(g: RecordGap): Record<string, string> {
   const first = g.dates[0];
   const last = g.dates[g.dates.length - 1];
   if (g.kind === 'sales') return { tab: 'daily', month: monthOf(first), quick: '1', date: first, channel: g.channel, route: g.routeId };
-  return { tab: 'daily', month: monthOf(last), from: first, to: last, route: g.routeId, channel: g.channel, need: 'discount' };
+  return { tab: 'settle', from: first, to: last, route: g.routeId, channel: g.channel };
 }
 
 /**

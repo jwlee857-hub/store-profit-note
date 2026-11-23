@@ -134,6 +134,14 @@ export function coveredByPeriodCost(
   );
 }
 
+/**
+ * 배달앱 정산서 기간 합계(경로 지정 기간 비용)가 이 기록의 수수료를 대신하는가.
+ * 대신하면 그 기록의 계산·추정 수수료는 계산에서 빼고(실제값은 남김) 미입력으로도 세지 않는다 — 기간 합계와 두 번 더하지 않게.
+ */
+export function settledByPeriod(periodCosts: PeriodCost[], e: Pick<SalesEntry, 'routeId' | 'channel' | 'date'>): boolean {
+  return periodCosts.some((pc) => pc.routeId === e.routeId && pc.attribution === e.channel && e.date >= pc.start && e.date <= pc.end);
+}
+
 export function routeHasPlatform(data: Pick<AppData, 'routes'>, routeId: string): boolean {
   return !!data.routes.find((r) => r.id === routeId)?.platformId;
 }
@@ -465,8 +473,11 @@ export function computeSummary(data: AppData, range: DateRange, pairedExcluded: 
       }
       const hasPlatform = routeHasPlatform(data, e.routeId);
       const required = new Set(requiredCategories(ch, hasPlatform, e.bundledFee));
+      const settled = settledByPeriod(data.periodCosts, e);
       for (const cat of DIRECT_CATEGORIES) {
         if (cat === 'payment' && e.bundledFee) continue; // 묶음 수수료면 결제 수수료를 따로 계산하지 않음
+        // 정산서 기간 합계가 대신하는 수수료: 일별 실제값만 남기고 계산·추정값은 빼며, 비어 있어도 미입력이 아니다
+        if (settled && (cat === 'brokerage' || cat === 'payment') && e.costs[cat].actual === null) continue;
         const { amount } = effectiveCost(e.costs[cat]);
         // 금액은 실제값 우선 규칙 그대로, 근거(실제·설정 기준 계산·추정)는 저장된 근거 문구로 구분한다
         const kind = costKindOf(cat, e.costs[cat], e);

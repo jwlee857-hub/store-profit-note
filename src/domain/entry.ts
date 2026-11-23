@@ -1,5 +1,5 @@
 // 매출 기록의 데이터 상태, 금액 기준 전환, 날짜별 입력 현황. UI와 무관한 순수 함수.
-import { applicableCategories, coveredByPeriodCost, effectiveCost, grossSales, isOpenDay, netSales, requiredCategories, routeHasPlatform, salesSlots, type SalesAmounts } from './calc';
+import { applicableCategories, coveredByPeriodCost, effectiveCost, grossSales, isOpenDay, netSales, requiredCategories, routeHasPlatform, salesSlots, settledByPeriod, type SalesAmounts } from './calc';
 import { costBasisOf, costDetailText, costKindOf } from './costBasis';
 import { averageMenuCostRate, calcFees, estimateFood, feeRuleFor, foodBaseLabel, foodEstimateBase, payKindOf, pickEffective, type FeeCalc, type FeeNeed } from './estimate';
 import { isValidDate } from './dates';
@@ -67,8 +67,11 @@ export function entryStatus(e: SalesEntry, data: Pick<AppData, 'routes' | 'perio
   const calculated: DirectCategory[] = [];
   let anyEntered = false;
   let knownCost = 0;
+  const settled = settledByPeriod(data.periodCosts, e);
   for (const c of DIRECT_CATEGORIES) {
     if (c === 'payment' && e.bundledFee) continue;
+    // 정산서 기간 합계가 대신하는 수수료 (computeSummary와 같은 규칙)
+    if (settled && (c === 'brokerage' || c === 'payment') && e.costs[c].actual === null) continue;
     const ec = effectiveCost(e.costs[c]);
     if (ec.status !== 'missing') {
       anyEntered = true;

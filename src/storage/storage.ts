@@ -221,6 +221,23 @@ export function migrate(data: unknown, version: number): unknown {
     d = { ...d, schemaVersion: 7, foodCostRates: Array.isArray(d.foodCostRates) ? d.foodCostRates : [] };
     v = 7;
   }
+  if (v < 8) {
+    // v7 → v8: 쿠폰 조건에 대상 배달앱·기존 쿠폰액·쿠폰 사용 건수 추가. 모르는 값이므로 모두 빈 값(null)으로 채운다.
+    // 대상 배달앱이 비어 있으면 이전처럼 배달 전체로 집계한다.
+    const okNum = (x: unknown) => (typeof x === 'number' && Number.isFinite(x) ? x : null);
+    d = {
+      ...d,
+      schemaVersion: 8,
+      solutions: Array.isArray(d.solutions)
+        ? d.solutions.map((s) => {
+            if (!isObj(s) || !isObj(s.coupon)) return s;
+            const c = s.coupon;
+            return { ...s, coupon: { ...c, routeId: isStr(c.routeId) ? c.routeId : null, previousAmount: okNum(c.previousAmount), usedCount: okNum(c.usedCount) } };
+          })
+        : d.solutions,
+    };
+    v = 8;
+  }
   return d;
 }
 
@@ -271,7 +288,8 @@ export function validateData(d: unknown): string | null {
     if (!isObj(s) || !isStr(s.name) || !isObj(s.review) || !isObj(s.kpi)) return '실행 계획 항목 형식 오류';
     if (!['total', 'increase', 'growthRate', 'perBusinessDay'].includes(s.kpiTargetMode as string)) return `실행 계획 "${s.name}"의 목표 기준 값 오류`;
     if (!Array.isArray(s.extraKpis) || !s.extraKpis.every((k) => isObj(k) && isStr(k.key) && isStr(k.channel))) return `실행 계획 "${s.name}"의 함께 볼 지표 형식 오류`;
-    if (!isObj(s.coupon) || !isNumOrNull(s.coupon.amount) || !isNumOrNull(s.coupon.minOrder)) return `실행 계획 "${s.name}"의 쿠폰 조건 형식 오류`;
+    if (!isObj(s.coupon) || !isNumOrNull(s.coupon.amount) || !isNumOrNull(s.coupon.minOrder) || !isNumOrNull(s.coupon.previousAmount) || !isNumOrNull(s.coupon.usedCount) || !(s.coupon.routeId === null || isStr(s.coupon.routeId)))
+      return `실행 계획 "${s.name}"의 쿠폰 조건 형식 오류`;
     if (!isNumOrNull((s.review as Record<string, unknown>).nextCouponAmount)) return `실행 계획 "${s.name}"의 다음 쿠폰 금액 형식 오류`;
   }
   if (!Array.isArray(d.perOrderCosts)) return '주문 1건당 기본 비용 형식 오류';

@@ -21,13 +21,13 @@ import {
   type BadgeTone,
 } from '../components/ui';
 import { computeSummary, expectedProfitChange, getMetric } from '../domain/calc';
-import { addDays, daysInclusive, formatRange, isValidDate, isValidRange, previousRange, todayStr, weekday } from '../domain/dates';
-import { solutionDraft } from '../domain/draft';
+import { addDays, daysInclusive, formatRange, isValidDate, isValidRange, nextMonday as nextMondayOf, previousRange, todayStr } from '../domain/dates';
+import { retestDraft, solutionDraft } from '../domain/draft';
 import { newSolution } from '../domain/factory';
 import { couponText, fmt, fmtKpiTarget, fmtSigned, josa, kpiTargetSuffix } from '../domain/format';
 import { CHANNEL_LABEL, DECISION_LABEL, DIRECTION_LABEL, METRIC_META, STATUS_LABEL, metricLabelEasy } from '../domain/labels';
 import { KPI_MODE_LABEL, kpiModeAllowed, kpiTargetWarning, recentRanges } from '../domain/periods';
-import { DELIVERY_KPI_SET, SOLUTION_TEMPLATES, defaultKpisFor, sameMetric, suggestedCoupon } from '../domain/templates';
+import { DELIVERY_KPI_SET, SOLUTION_TEMPLATES, defaultKpisFor, sameMetric } from '../domain/templates';
 import { CHANNELS, type KpiTargetMode, type MetricRef, type Solution, type SolutionStatus } from '../domain/types';
 import { useApp, useData } from '../state/AppContext';
 
@@ -40,14 +40,19 @@ export function Solutions() {
   const [editing, setEditing] = useState<Solution | null>(null);
 
   useEffect(() => {
-    if (route.params.new === '1') {
+    const prev = route.params.retest ? data.solutions.find((x) => x.id === route.params.retest) : undefined;
+    if (prev) {
+      // 성과 확인의 '이 조건으로 2주 재시험'에서만 이전 계획의 조건을 넘긴다
+      setEditing(retestDraft(prev, todayStr()));
+      navigate('solutions', prev.problemId ? { problem: prev.problemId } : {});
+    } else if (route.params.new === '1') {
       const problem = data.problems.find((p) => p.id === route.params.problem) ?? null;
       setEditing(solutionDraft(data, problem, route.params.finding ?? null));
       navigate('solutions', route.params.problem ? { problem: route.params.problem } : {});
     } else if (route.params.solution) {
       document.getElementById(`sol-${route.params.solution}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
     }
-  }, [route.params.new, route.params.solution]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [route.params.new, route.params.solution, route.params.retest]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const list = data.solutions.filter((s) => problemFilter === 'all' || (problemFilter === 'none' ? s.problemId === null : s.problemId === problemFilter));
 
@@ -167,7 +172,7 @@ export function Solutions() {
                       {metricLabelEasy(s.kpi.key, s.kpi.channel)} 목표 {fmtKpiTarget(s.kpiTarget, s.kpiTargetMode, kpiUnit, METRIC_META[s.kpi.key].higherIsBetter)}
                     </p>
                     {s.extraKpis.length > 0 && <p className="mt-1 text-xs text-slate-600">함께 보기: {s.extraKpis.map((k) => metricLabelEasy(k.key, k.channel)).join(', ')}</p>}
-                    {couponText(s.coupon) && <p className="mt-1 text-xs text-slate-700">{couponText(s.coupon)}</p>}
+                    {couponText(s.coupon, data.routes.find((r) => r.id === s.coupon.routeId)?.name) && <p className="mt-1 text-xs text-slate-700">{couponText(s.coupon, data.routes.find((r) => r.id === s.coupon.routeId)?.name)}</p>}
                     {s.review.nextCouponAmount !== null && <p className="text-xs text-slate-700">결과 판단: 다음 기간 쿠폰 {s.review.nextCouponAmount === 0 ? '없음' : fmt(s.review.nextCouponAmount, 'won')}</p>}
                     {s.successCriteria && <p className="mt-1 text-xs text-emerald-800">성공: {s.successCriteria}</p>}
                     {s.stopCriteria && <p className="text-xs text-red-800">중단: {s.stopCriteria}</p>}
@@ -186,12 +191,10 @@ export function Solutions() {
 function SolutionEditor({ initial, onClose }: { initial: Solution; onClose: () => void }) {
   const data = useData();
   const { update, navigate } = useApp();
-  // 새 계획: 지난 결과 판단에서 정한 '다음 기간 쿠폰 금액'을 쿠폰 금액 기본값으로 불러온다
-  const [couponFrom] = useState(() => {
-    if (data.solutions.some((x) => x.id === initial.id) || initial.coupon.amount !== null) return null;
-    return suggestedCoupon(data.solutions, initial.target);
-  });
-  const [s, setS] = useState<Solution>(() => (couponFrom ? { ...initial, coupon: { ...initial.coupon, amount: couponFrom.amount } } : initial));
+  // 쿠폰 조건은 받은 초안 그대로 (일반 새 계획은 빈 조건, 재시험 초안은 이전 계획의 조건)
+  const [s, setS] = useState<Solution>(initial);
+  const deliveryApps = data.routes.filter((r) => r.platformId && r.channels.includes('delivery'));
+  const setCoupon = (patch: Partial<Solution['coupon']>) => setS((x) => ({ ...x, coupon: { ...x.coupon, ...patch } }));
   const [touched, setTouched] = useState(false);
   const isNew = !data.solutions.some((x) => x.id === s.id);
   const set = <K extends keyof Solution>(k: K, v: Solution[K]) => setS((x) => ({ ...x, [k]: v }));
@@ -253,11 +256,7 @@ function SolutionEditor({ initial, onClose }: { initial: Solution; onClose: () =
     onClose();
   };
 
-  const nextMonday = (() => {
-    const t = todayStr();
-    const wd = weekday(t);
-    return addDays(t, ((8 - wd) % 7) || 7);
-  })();
+  const nextMonday = nextMondayOf(todayStr());
 
   return (
     <Modal
@@ -333,19 +332,36 @@ function SolutionEditor({ initial, onClose }: { initial: Solution; onClose: () =
           </div>
           <fieldset aria-label="쿠폰·할인 조건" className="rounded-lg p-3 ring-1 ring-slate-200">
             <legend className="px-1 text-sm font-medium text-slate-800">쿠폰·할인 조건 (선택)</legend>
-            <div className="grid grid-cols-2 gap-3">
-              <Field label="쿠폰 금액">
-                {(id) => <NumberInput id={id} value={s.coupon.amount} onChange={(v) => set('coupon', { ...s.coupon, amount: v })} suffix="원" placeholder="미정" />}
+            {s.target === 'delivery' && deliveryApps.length > 0 && (
+              <Field label="대상 배달앱" hint="고르면 성과 확인의 배달 숫자도 이 배달앱 주문만 집계해요.">
+                {(id) => (
+                  <Select
+                    id={id}
+                    value={s.coupon.routeId ?? ''}
+                    onChange={(v) => setCoupon({ routeId: v || null })}
+                    options={[{ value: '', label: '배달 전체' }, ...deliveryApps.map((r) => ({ value: r.id, label: r.name }))]}
+                  />
+                )}
+              </Field>
+            )}
+            <div className="mt-3 grid grid-cols-2 gap-3">
+              <Field label="기존 쿠폰 금액">
+                {(id) => <NumberInput id={id} value={s.coupon.previousAmount} onChange={(v) => setCoupon({ previousAmount: v })} suffix="원" placeholder="모름" />}
+              </Field>
+              <Field label="쿠폰 금액" hint="시험할 금액. 비우면 미정, 0이면 쿠폰 중단">
+                {(id) => <NumberInput id={id} value={s.coupon.amount} onChange={(v) => setCoupon({ amount: v })} suffix="원" placeholder="미정" />}
               </Field>
               <Field label="최소 주문금액">
-                {(id) => <NumberInput id={id} value={s.coupon.minOrder} onChange={(v) => set('coupon', { ...s.coupon, minOrder: v })} suffix="원" placeholder="미정" />}
+                {(id) => <NumberInput id={id} value={s.coupon.minOrder} onChange={(v) => setCoupon({ minOrder: v })} suffix="원" placeholder="미정" />}
+              </Field>
+              <Field label="쿠폰 사용 건수 (아는 경우만)" hint="배달앱 통계에서 확인한 경우에만 넣으세요.">
+                {(id) => <NumberInput id={id} value={s.coupon.usedCount} onChange={(v) => setCoupon({ usedCount: v })} suffix="건" placeholder="모름" />}
               </Field>
             </div>
-            {couponFrom && s.coupon.amount === couponFrom.amount && (
-              <p className="mt-2 text-xs text-slate-600">
-                ‘{couponFrom.from.name}’ 결과 판단에서 정한 다음 기간 쿠폰 금액({fmt(couponFrom.amount, 'won')})을 불러왔어요. 바꿔도 됩니다.
-              </p>
-            )}
+            <p className="mt-2 text-sm text-slate-700" aria-live="polite">
+              {s.coupon.amount === null ? '시험 쿠폰: 미정' : s.coupon.amount === 0 ? '시험 쿠폰: 0원 — 쿠폰 중단' : `시험 쿠폰: ${fmt(s.coupon.amount, 'won')}`}
+              {s.start && s.end ? ` · 적용 기간 ${s.start} ~ ${s.end}` : ' · 적용 기간은 아래 실행 기간'}
+            </p>
             <p className="mt-1 text-xs text-slate-500">조건을 적어 두면 성과 확인에서 어떤 쿠폰으로 낸 결과인지 함께 보여 줘요. 비워 둬도 됩니다.</p>
           </fieldset>
         </section>

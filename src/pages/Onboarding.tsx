@@ -26,8 +26,9 @@ export function Onboarding() {
 
   const finish = (apps: DeliveryAppInput[], directDelivery: boolean) => {
     const d = registerStoreData({ name, channels: CHANNELS.filter((c) => channels.includes(c)), regularOpenDays: days, deliveryApps: apps, directDelivery });
-    replaceAll(d, '가게를 등록했습니다. 필요한 설정을 이어서 입력하세요.');
-    navigate('store');
+    // 설정 화면 대신 홈으로: 수수료율·원가율을 몰라도 오늘 매출과 주문 수부터 기록할 수 있다
+    replaceAll(d, '가게를 등록했어요. 오늘 매출부터 기록해 보세요.');
+    navigate('dashboard');
   };
 
   const register = () => {

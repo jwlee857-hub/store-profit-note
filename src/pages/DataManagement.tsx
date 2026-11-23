@@ -102,8 +102,10 @@ export function StorageGuide() {
   );
 }
 
+const BACKUP_GUIDED_KEY = 'restaurant-profit-beta:backup-guided';
+
 export function DataManagement() {
-  const { data, replaceAll, confirm, navigate } = useApp();
+  const { data, replaceAll, confirm, navigate, toast } = useApp();
   if (!data) return null;
   return (
     <Card title="저장과 백업" subtitle={`저장 형식 v${data.schemaVersion} · 마지막 저장 ${new Date(data.updatedAt).toLocaleString('ko-KR')}`}>
@@ -111,7 +113,22 @@ export function DataManagement() {
         <StorageGuide />
       </Notice>
       <div className="flex flex-wrap gap-2">
-        <Button variant="primary" onClick={() => exportJson(data)}>
+        <Button
+          variant="primary"
+          onClick={() => {
+            exportJson(data);
+            // 첫 백업이면 다른 기기로 옮기는 방법을 함께 알려준다 (이 기기에서 한 번만)
+            let first = false;
+            try {
+              first = !localStorage.getItem(BACKUP_GUIDED_KEY);
+              localStorage.setItem(BACKUP_GUIDED_KEY, '1');
+            } catch {
+              first = false;
+            }
+            if (first)
+              toast({ text: '백업 파일을 저장했어요', detail: '다른 기기로 옮기려면: 파일을 메일·메신저 ‘나에게 보내기’로 보낸 뒤, 그 기기에서 ‘백업 파일 불러오기’를 누르세요. 그 기기의 데이터는 파일 내용으로 바뀌어요.' }, 'info');
+          }}
+        >
           백업 파일 저장
         </Button>
         <ImportButton />

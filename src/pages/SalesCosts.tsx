@@ -1,5 +1,6 @@
 import { useId, useMemo, useState } from 'react';
 import { EntryStatusBadge, QuickEntry, TodayStatus, type QuickEntryProps } from '../components/QuickEntry';
+import { Settlement } from './Settlement';
 import { recentRanges } from '../domain/periods';
 import { pendingEntries } from '../domain/pending';
 import { copyFromPrevMonth, isMonthKey, monthCosts, monthLabel, monthOf, monthRangeOf, monthShort, rowChanged, shiftMonth, wonShort, type MonthKey } from '../domain/months';
@@ -28,7 +29,6 @@ import {
   applicableCategories,
   coveredByPeriodCost,
   computeSummary,
-  discountDetailKnown,
   netSales,
   requiredCategories,
   routeHasPlatform,
@@ -62,11 +62,11 @@ import {
 import { hasErrors, validatePeriodCost, validateSalesEntry, type ValidationResult } from '../domain/validation';
 import { useApp, useData } from '../state/AppContext';
 
-type Tab = 'daily' | 'period' | 'customers';
+type Tab = 'daily' | 'settle' | 'period' | 'customers';
 
 export function SalesCosts() {
   const { route, navigate } = useApp();
-  const tab = (['daily', 'period', 'customers'] as Tab[]).includes(route.params.tab as Tab) ? (route.params.tab as Tab) : 'daily';
+  const tab = (['daily', 'settle', 'period', 'customers'] as Tab[]).includes(route.params.tab as Tab) ? (route.params.tab as Tab) : 'daily';
   // 선택한 달은 주소(?month=2026-11)에 남겨 새로고침해도 유지. 처음 열면 이번 달
   const month: MonthKey = isMonthKey(route.params.month) ? route.params.month : monthOf(todayStr());
   const setMonth = (m: MonthKey) => navigate('sales', { tab, month: m });
@@ -79,12 +79,14 @@ export function SalesCosts() {
           onChange={(t) => navigate('sales', isMonthKey(route.params.month) ? { tab: t, month: route.params.month } : { tab: t })}
           options={[
             { value: 'daily', label: '일별 매출' },
+            { value: 'settle', label: '배달앱 정산 반영' },
             { value: 'period', label: '월세·급여 등 기간별 비용' },
             { value: 'customers', label: '고객 지표 (선택)' },
           ]}
         />
       </div>
       {tab === 'daily' && <DailySales month={month} onMonth={setMonth} />}
+      {tab === 'settle' && <Settlement />}
       {tab === 'period' && <PeriodCosts key={month} month={month} onMonth={setMonth} />}
       {tab === 'customers' && <CustomerMetrics />}
     </>
@@ -149,12 +151,6 @@ function DailySales({ month, onMonth }: { month: MonthKey; onMonth: (m: MonthKey
     );
 
   // 홈 '추정값 확정하기'에서 넘어온 경우: 그 기간·경로·비용 항목이 아직 추정값인 기록만 보여준다
-  // 성과 확인의 '할인액 채우기': 그 기간·경로에서 할인액을 모르는(순매출만 입력한) 기록만 보여준다
-  const needDiscount = (() => {
-    const p = route.params;
-    if (p.need !== 'discount' || !p.from || !p.to || !p.route || !isValidDate(p.from) || !isValidDate(p.to) || !CHANNELS.includes(p.channel as Channel)) return null;
-    return { start: p.from, end: p.to, routeId: p.route, channel: p.channel as Channel };
-  })();
   const pending = (() => {
     const p = route.params;
     if (!p.from || !p.to || !p.route || !p.channel || !p.cats || !isValidDate(p.from) || !isValidDate(p.to) || !CHANNELS.includes(p.channel as Channel)) return null;
@@ -162,13 +158,7 @@ function DailySales({ month, onMonth }: { month: MonthKey; onMonth: (m: MonthKey
     if (!categories.length) return null;
     return { start: p.from, end: p.to, routeId: p.route, channel: p.channel as Channel, categories };
   })();
-  const pendingList = pending
-    ? pendingEntries(data, pending)
-    : needDiscount
-      ? data.sales
-          .filter((e) => e.routeId === needDiscount.routeId && e.channel === needDiscount.channel && e.date >= needDiscount.start && e.date <= needDiscount.end && netSales(e) !== null && !discountDetailKnown(e))
-          .sort((a, b) => b.date.localeCompare(a.date))
-      : null;
+  const pendingList = pending ? pendingEntries(data, pending) : null;
   const rows = (pendingList ?? data.sales.filter((e) => e.date >= range.start && e.date <= range.end && (channel === 'all' || e.channel === channel)))
     .map((e) => ({ e, st: entryStatus(e, data), net: netSales(e) }))
     .filter((r) => pendingList || !onlyIssues || !isCostDone(r.st.status))
@@ -183,7 +173,7 @@ function DailySales({ month, onMonth }: { month: MonthKey; onMonth: (m: MonthKey
 
   const afterSave = (saved: SalesEntry) => {
     // 확정 대기 목록에서 채우는 중이면 목록을 유지한다 (채운 기록은 목록에서 빠짐)
-    if (pending || needDiscount) return;
+    if (pending) return;
     // 저장한 입력이 목록에서 바로 보이도록: 다른 달이면 그 달로 이동하고 필터를 푼다
     const m = monthOf(saved.date);
     if (m !== month) onMonth(m);
@@ -223,21 +213,6 @@ function DailySales({ month, onMonth }: { month: MonthKey; onMonth: (m: MonthKey
       />
 
       <Card title="매출 기록" subtitle="날짜별로 묶어 보여줍니다. 비용 상태를 눌러 비용을 확인·보완하세요.">
-        {needDiscount && (
-          <Notice tone="warn" className="mb-3">
-            <p className="font-medium">
-              할인액 미입력: {needDiscount.start.slice(5).replace('-', '/')}~{needDiscount.end.slice(5).replace('-', '/')} {routeName(needDiscount.routeId)}({CHANNEL_LABEL[needDiscount.channel]})
-            </p>
-            <p className="mt-0.5 text-sm">
-              {pendingList!.length
-                ? `순매출만 입력해 가게 부담 할인액을 모르는 기록 ${pendingList!.length}건이에요. '비용 확인'을 눌러 정산서의 할인액(없으면 0원)을 넣으면 목록에서 빠져요. 순매출은 다시 빼지 않아요.`
-                : '이 기간의 할인액을 모두 채웠어요.'}
-            </p>
-            <Button size="sm" className="mt-2" onClick={() => navigate('sales', { tab: 'daily', month })}>
-              전체 기록 보기
-            </Button>
-          </Notice>
-        )}
         {pending && (
           <Notice tone="warn" className="mb-3">
             <p className="font-medium">

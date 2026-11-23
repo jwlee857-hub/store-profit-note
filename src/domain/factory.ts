@@ -13,6 +13,7 @@ import {
   type SalesEntry,
   type Solution,
   type StoreSettings,
+  type CouponTerms,
 } from './types';
 
 let counter = 0;
@@ -177,6 +178,8 @@ export function newProblem(partial: Partial<Problem> = {}): Problem {
   };
 }
 
+export const emptyCoupon = (): CouponTerms => ({ amount: null, minOrder: null, routeId: null, previousAmount: null, usedCount: null });
+
 export function newSolution(partial: Partial<Solution> = {}): Solution {
   return {
     id: uid('sol'),
@@ -196,7 +199,7 @@ export function newSolution(partial: Partial<Solution> = {}): Solution {
     budgetIncludedInCost: true,
     kpi: { key: 'operatingProfit', channel: 'all' },
     extraKpis: [],
-    coupon: { amount: null, minOrder: null },
+    coupon: emptyCoupon(),
     kpiTarget: null,
     kpiTargetMode: 'total',
     successCriteria: '',

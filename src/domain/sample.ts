@@ -399,7 +399,7 @@ export function generateSample(end: DateStr, seed = 20261116): AppData {
       budgetIncludedInCost: true,
       // 배달 대상: 1건당 남는 금액·배달에서 남은 금액·가게 전체 영업이익을 함께 본다
       ...defaultKpisFor('delivery', { key: 'directProfit', channel: 'delivery' }),
-      coupon: { amount: 3000, minOrder: 15000 },
+      coupon: { amount: 3000, minOrder: 15000, routeId: 'route_app_a', previousAmount: 1000, usedCount: null },
       kpiTarget: null,
       successCriteria: t1.successCriteria,
       stopCriteria: t1.stopCriteria,

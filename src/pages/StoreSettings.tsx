@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   Badge,
   Button,
@@ -36,6 +36,12 @@ import { useApp, useData } from '../state/AppContext';
 import { DataManagement } from './DataManagement';
 
 export function StoreSettingsPage() {
+  const { route } = useApp();
+  // 홈의 '다음부터 자동 계산' 제안에서 넘어오면 그 설정으로 바로 이동
+  useEffect(() => {
+    const id = route.params.section;
+    if (id) document.getElementById(id)?.scrollIntoView?.({ behavior: 'smooth', block: 'start' });
+  }, [route.params.section]);
   return (
     <>
       <PageHeader title="가게 설정" description="설정을 바꿔도 이미 저장된 과거 실적은 자동으로 바뀌지 않습니다." />
@@ -515,6 +521,7 @@ function FeeRules() {
 
   return (
     <Card
+      id="fee-rules"
       title="수수료 자동 계산 설정"
       subtitle="매출 날짜와 주문 경로에 맞는 설정을 자동 적용합니다. 정산서에서 확인한 금액을 입력하면 자동 계산액을 대신합니다."
       actions={
@@ -695,6 +702,7 @@ function PerOrderCosts() {
 
   return (
     <Card
+      id="per-order"
       title="주문 1건당 기본 비용"
       subtitle="날마다 알기 어려운 비용을 주문 1건당 금액으로 정해 두면, 매출을 입력할 때 주문 수 × 금액으로 채웁니다."
       actions={
@@ -825,6 +833,7 @@ function FoodCostRates() {
 
   return (
     <Card
+      id="food-rate"
       title="식재료비 원가율"
       subtitle="정해 두면 매출을 입력할 때 상품 판매액 × 원가율로 식재료비를 채웁니다."
       actions={

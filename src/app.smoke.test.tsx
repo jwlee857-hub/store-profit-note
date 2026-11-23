@@ -774,7 +774,7 @@ describe('앱 스모크 테스트', () => {
     expect(text()).not.toMatch(/재구매율\s*0(\.0)?%/);
     expect(stored().prefs.customerData).toBe('unavailable');
     await go('dashboard');
-    expect(text()).toContain('오늘 매출 기록하기'); // 핵심 기능은 그대로
+    expect(text()).toMatch(/오늘 (홀 |배달 |포장 )?매출 기록하기/); // 핵심 기능은 그대로
   });
 
   it('백업 파일 불러오기: 바뀌는 범위를 보여주고 확인 후 덮어쓴다 (이전 버전 파일 포함)', async () => {
@@ -835,9 +835,11 @@ describe('앱 스모크 테스트', () => {
     expect(text()).toContain('가게명을 입력하세요');
     setInput(document.querySelector('input[placeholder="예: 우리동네 분식"]') as HTMLInputElement, '테스트 식당');
     clickButton('등록하고 시작');
-    expect(text()).toContain('기본 정보');
+    // 등록 직후 설정 화면이 아니라 홈: 운영하는 판매 방식(홀만)의 첫 마감 버튼을 바로 누를 수 있다
+    expect(window.location.hash).toContain('dashboard');
+    expect(findButton('＋ 오늘 홀 매출 기록하기')).toBeTruthy();
+    expect(text()).toContain('수수료율이나 원가율을 몰라도 매출과 주문 수만 먼저 저장할 수 있어요');
     expect(text()).not.toContain('샘플 데이터 사용 중');
-    await go('dashboard');
     expect(text()).toContain('아직 매출 기록이 없습니다');
     expect(text()).toContain('1개 판매 방식 중 0개 완료 · 남은 경로 1곳');
     await go('diagnosis');
@@ -925,7 +927,7 @@ describe('앱 스모크 테스트', () => {
       { key: 'directProfit', channel: 'delivery' },
       { key: 'operatingProfit', channel: 'all' },
     ]);
-    expect(sol.coupon).toEqual({ amount: 2000, minOrder: 15000 });
+    expect(sol.coupon).toEqual({ amount: 2000, minOrder: 15000, routeId: null, previousAmount: null, usedCount: null });
 
     await go('performance', `?solution=${sol.id}`);
     const t = text();
@@ -937,15 +939,15 @@ describe('앱 스모크 테스트', () => {
     expect(t).toContain('가게에 남은 돈');
     expect(document.querySelector('[aria-label="할인 1,000원당 효과"]')).toBeTruthy();
 
-    // 결과 판단에 다음 기간 쿠폰 금액을 적으면, 다음 새 계획의 기본값이 된다
+    // 결과 판단의 다음 쿠폰 금액은 저장되지만, 무관한 일반 새 계획에는 채우지 않는다 (재시험에서만 승계 — 5차 2단계 테스트)
     setInput(inputByLabel('다음 기간 쿠폰 금액 (선택)'), '1500');
     clickButton('비교 기간과 판단 저장');
     expect(stored().solutions.find((s) => s.id === sol.id)!.review.nextCouponAmount).toBe(1500);
     await go('solutions');
     clickButton('실행 계획 등록');
     dlg = dialog();
-    expect(numVal(inputByLabel('쿠폰 금액', dlg))).toBe('1500');
-    expect(dlg.textContent).toContain('결과 판단에서 정한 다음 기간 쿠폰 금액(1,500원)을 불러왔어요');
+    expect(numVal(inputByLabel('쿠폰 금액', dlg))).toBe('');
+    expect(dlg.textContent).toContain('시험 쿠폰: 미정');
   });
 
   it('5차 1단계: 배달 계획 성과 맨 위에 세 숫자·문장·맥락이 보이고, 빠진 기록은 0원으로 비교하지 않고 채우러 갈 수 있다', async () => {
@@ -997,6 +999,105 @@ describe('앱 스모크 테스트', () => {
     expect(dialog().textContent).toContain('매장 방문 주문 · 홀');
   });
 
+  it('5차 2단계 흐름: 신규 등록 → 배달 20만 원·10건 → 실제 수수료 반영 → 2주 성과 → 다음 쿠폰 2,000원 → 재시험 계획', async () => {
+    mount();
+    clickButton('등록 시작');
+    setInput(document.querySelector('input[placeholder="예: 우리동네 분식"]') as HTMLInputElement, '덮밥집');
+    const box = (label: string) => Array.from(document.querySelectorAll('label')).find((l) => l.textContent?.trim() === label)!.querySelector('input')!;
+    act(() => box('배달').click());
+    act(() => box('포장').click());
+    clickButton('등록하고 시작');
+    clickButton('배달 경로 만들고 시작');
+    setInput(inputByLabel('배달앱 1 이름'), '배달앱 가');
+    clickButton('배달 경로 만들고 시작');
+    // 등록 직후 홈에서 바로 배달 첫 마감 (수수료율·원가율 없이)
+    expect(window.location.hash).toContain('dashboard');
+    clickButton('＋ 오늘 배달 매출 기록하기');
+    let dlg = dialog();
+    expect(dlg.textContent).toContain('배달앱 가 · 배달');
+    setInput(inputByLabel('오늘 매출', dlg), '200000');
+    setInput(inputByLabel('완료 주문 수', dlg), '10');
+    clickButton('저장하고 닫기', dlg);
+    const today = todayStr();
+    const first = stored().sales.find((e) => e.date === today && e.channel === 'delivery')!;
+    expect([netSales(first), first.orders, first.storeDiscount]).toEqual([200_000, 10, null]);
+    // 방금 기록에 관련된 설정 하나만 제안
+    expect(text()).toContain('첫 기록을 저장했어요');
+    expect(text()).toContain('용기 한 개 가격을 알면 다음부터 포장비를 자동 계산해요.');
+    // 홈의 정산 할 일 → 배달앱 정산 반영 화면에서 할인·실제 수수료 보완
+    const todo = document.querySelector('[aria-label="정산 반영할 것"]') as HTMLElement;
+    expect(todo.textContent).toMatch(/배달앱 가\(배달\).*할인액 미입력 1건.*수수료 미입력 1건/);
+    await act(async () => todo.querySelector('button')!.click());
+    expect(window.location.hash).toContain('tab=settle');
+    const md = `${Number(today.slice(5, 7))}/${Number(today.slice(8, 10))}`;
+    const byAria = (l: string) => document.querySelector(`input[aria-label="${md} ${l}"]`) as HTMLInputElement;
+    setInput(byAria('가게 부담 할인'), '0');
+    setInput(byAria('환불'), '0');
+    setInput(byAria('실제 중개 수수료'), '15000');
+    setInput(byAria('실제 결제 수수료'), '5000');
+    clickButton(/^정산 반영 저장/);
+    const settled = stored().sales.find((e) => e.id === first.id)!;
+    expect([netSales(settled), settled.storeDiscount, settled.costs.brokerage.actual, settled.costs.payment.actual]).toEqual([200_000, 0, 15_000, 5_000]);
+
+    // 2주 성과를 보려고 지난 27일치 가상 기록을 넣는다 (배달앱 가 기록 + 홀·포장은 매출 없음 확인)
+    const data = stored();
+    const app = data.routes.find((r) => r.name === '배달앱 가')!;
+    for (let i = 1; i <= 27; i++) {
+      const date = addDays(today, -i);
+      const e = structuredClone(settled);
+      Object.assign(e, { id: `v${i}`, date, netInput: 180_000 + (i % 5) * 10_000, orders: 9 + (i % 4), storeDiscount: i <= 13 ? 20_000 : 10_000 });
+      data.sales.push(e);
+      for (const r of data.routes.filter((x) => x.id !== app.id))
+        for (const ch of r.channels) data.salesChecks.push({ date, channel: ch, routeId: r.id, status: 'noSales', checkedAt: '' });
+    }
+    for (const r of data.routes.filter((x) => x.id !== app.id)) for (const ch of r.channels) data.salesChecks.push({ date: today, channel: ch, routeId: r.id, status: 'noSales', checkedAt: '' });
+    unmount();
+    localStorage.setItem(STORAGE_KEY, serialize(data));
+    mount();
+    // 배달 쿠폰 계획: 대상 배달앱·기존/시험 쿠폰액·최소 주문액·적용 기간
+    await go('solutions');
+    clickButton('실행 계획 등록');
+    dlg = dialog();
+    setInput(inputByLabel('한 줄 요약', dlg), '배달앱 가 쿠폰 2주 시험');
+    setSelect(inputByLabel('어디에 적용하나요?', dlg) as unknown as HTMLSelectElement, 'delivery');
+    setSelect(inputByLabel('대상 배달앱', dlg) as unknown as HTMLSelectElement, app.id);
+    setInput(inputByLabel('기존 쿠폰 금액', dlg), '1000');
+    setInput(inputByLabel('쿠폰 금액', dlg), '3000');
+    setInput(inputByLabel('최소 주문금액', dlg), '15000');
+    // 2주 실행이 어제 끝난 상황 (오늘은 결과를 보는 날)
+    setInput(inputByLabel('시작일', dlg), addDays(today, -14));
+    setInput(inputByLabel('종료일', dlg), addDays(today, -1));
+    clickButton('저장', dlg);
+    const plan = stored().solutions.find((s) => s.name === '배달앱 가 쿠폰 2주 시험')!;
+    expect(plan.coupon).toEqual({ routeId: app.id, previousAmount: 1000, amount: 3000, minOrder: 15000, usedCount: null });
+    await go('performance', `?solution=${plan.id}`);
+    const summary = document.querySelector('[aria-label="쿠폰 결정 세 지표"]')!.textContent!;
+    expect(summary).toMatch(/① 배달앱 가 배달 한 건당 남은 돈[\d,]+원/);
+    expect(text()).toContain('배달앱 가 · 쿠폰 1,000원 → 3,000원 · 최소 주문 15,000원');
+    expect(text()).toContain('배달앱 가 전체의 전후 변화');
+    expect(text()).not.toContain('빠진 기록이 있어');
+    // 다음 쿠폰 2,000원 → 이 조건으로 2주 재시험 (저장 전 수정 가능)
+    setInput(inputByLabel('다음 기간 쿠폰 금액 (선택)'), '2000');
+    expect(text()).toContain('다음 쿠폰: 2,000원');
+    await clickLastButton('이 조건으로 2주 재시험');
+    expect(stored().solutions.find((s) => s.id === plan.id)!.review.nextCouponAmount).toBe(2000);
+    dlg = dialog();
+    expect(numVal(inputByLabel('쿠폰 금액', dlg))).toBe('2000');
+    expect(numVal(inputByLabel('기존 쿠폰 금액', dlg))).toBe('3000');
+    expect(numVal(inputByLabel('최소 주문금액', dlg))).toBe('15000');
+    expect((inputByLabel('대상 배달앱', dlg) as unknown as HTMLSelectElement).value).toBe(app.id);
+    setInput(inputByLabel('최소 주문금액', dlg), '17000'); // 저장 전에 고칠 수 있다
+    clickButton('저장', dlg);
+    const retest = stored().solutions.find((s) => s.id !== plan.id && s.name.includes('2주 재시험'))!;
+    expect(retest.coupon).toEqual({ routeId: app.id, previousAmount: 3000, amount: 2000, minOrder: 17000, usedCount: null });
+    expect(retest.extraKpis).toEqual(plan.extraKpis);
+    // 무관한 일반 새 계획은 빈 조건
+    clickButton('실행 계획 등록');
+    dlg = dialog();
+    expect(numVal(inputByLabel('쿠폰 금액', dlg))).toBe('');
+    expect(errors).toEqual([]);
+  });
+
   it('4차 2단계: 홈에 추정값을 확인할 할 일이 보이고(설정대로 계산한 수수료는 제외), 누르면 그 기록만 모은 입력 화면으로 간다', async () => {
     mount();
     clickButton('샘플로 시작');
@@ -1019,14 +1120,12 @@ describe('앱 스모크 테스트', () => {
     expect(box.textContent).toMatch(/정산서 반영 대기: \d+\/\d+~\d+\/\d+ 배달앱 A\(배달\) 중개·결제 수수료기록 \d+건 · 추정 [\d,]+원/);
     const btn = Array.from(box.querySelectorAll('button')).find((b) => b.textContent!.includes('배달앱 A(배달)'))!;
     await act(async () => btn.click());
-    expect(window.location.hash).toContain('sales');
-    expect(text()).toMatch(/아직 추정값인 기록 \d+건만 보여 줘요/);
-    expect(text()).toContain('추정 포함');
+    // 수수료는 정산서로 여러 날을 한 번에 채우는 '배달앱 정산 반영' 화면으로 (그 배달앱·판매 방식·기간)
+    expect(window.location.hash).toContain('tab=settle');
+    expect(window.location.hash).toContain('route=route_app_a');
+    expect(text()).toContain('배달앱 A · 배달 날짜별 정산');
+    expect(document.querySelectorAll('input[aria-label$="실제 중개 수수료"]').length).toBeGreaterThan(0);
     expect(text()).not.toContain('추정 중');
-    // 목록(날짜별 기록 묶음)에는 그 경로의 배달 기록만
-    const records = Array.from(document.querySelectorAll('section:not([aria-label]) > ul > li'));
-    expect(records.length).toBeGreaterThan(0);
-    expect(records.map((li) => li.textContent!.match(/^(홀|배달|포장) · [^(순]+/)?.[0].trim())).toEqual(records.map(() => '배달 · 배달앱 A'));
     // 홈 상세 표에도 가게 부담 할인액(원)과 쉬운 이름
     await go('dashboard');
     expect(text()).toContain('쿠폰·할인으로 낸 돈');
@@ -1175,7 +1274,7 @@ describe('앱 스모크 테스트', () => {
     mount();
     registerStore();
     await go('dashboard');
-    clickButton('＋ 오늘 매출 기록하기');
+    clickButton(/^＋ 오늘 (홀 |배달 |포장 )?매출 기록하기$/); // 첫 기록 전에는 운영하는 판매 방식 이름이 붙는다
     const dlg = dialog();
     setInput(inputByLabel('오늘 매출', dlg), '500000');
     setInput(inputByLabel('완료 주문 수', dlg), '20');
@@ -1209,7 +1308,7 @@ describe('앱 스모크 테스트', () => {
     d.menus = [{ id: 'm', name: '김밥', onSale: true, versions: [{ id: 'v', effectiveFrom: '2026-01-01', prices: { hall: null, delivery: null, takeout: 5_000 }, costMode: 'rate', costRate: 30, costAmount: null, costSource: 'actual', note: '' }] }];
     localStorage.setItem(STORAGE_KEY, serialize(d));
     mount();
-    clickButton('＋ 오늘 매출 기록하기');
+    clickButton(/^＋ 오늘 (홀 |배달 |포장 )?매출 기록하기$/);
     let dlg = dialog();
     // 매출만 넣고 주문 수가 없으면 포장비는 구할 수 없으므로 무엇을 넣을지 알려준다
     setInput(inputByLabel('오늘 매출', dlg), '200000');

@@ -27,6 +27,7 @@ import { ESTIMATED_HINT } from '../domain/costBasis';
 import { GAP_NOTE, bucketTotal, comparableValue, compareCalc, compareValues, computeComparison, discountCalc, missingCostCount, profitForDisplay, quantityCalc, type ChannelSummary, type PeriodSummary } from '../domain/calc';
 import { gapTarget } from '../components/RecordGaps';
 import { recordGaps } from '../domain/review';
+import { settlementTodos, setupHint, type SetupHint } from '../domain/settlement';
 import { pendingEstimates, type PendingItem } from '../domain/pending';
 import { monthOf } from '../domain/months';
 import { WEEKDAY_LABELS, formatRange, isValidRange, shortDate, todayStr } from '../domain/dates';
@@ -67,15 +68,33 @@ export function Dashboard() {
   const [statusDate, setStatusDate] = useState(today);
   const [quick, setQuick] = useState<Partial<QuickEntryProps> | null>(null);
   const [detail, setDetail] = useState<SalesEntry | null>(null);
+  const [hint, setHint] = useState<SetupHint | null>(null);
+  const storeChannels = data.store?.channels ?? [];
+  const firstChannel: Channel | null = data.sales.length ? null : storeChannels.includes('delivery') ? 'delivery' : (storeChannels[0] ?? null);
 
   return (
     <>
       <PageHeader title="홈" description="오늘 기록하고, 주 1회 남은 돈과 먼저 볼 문제를 확인하세요." />
       <div className="space-y-4">
-        {/* ① 오늘 매출 기록하기 */}
-        <Button variant="primary" className="w-full py-3 text-base sm:w-auto sm:px-6" onClick={() => setQuick({})}>
-          ＋ 오늘 매출 기록하기
+        {/* ① 오늘 매출 기록하기 — 첫 기록 전에는 운영하는 판매 방식(배달 우선)으로 바로 연다 */}
+        <Button variant="primary" className="w-full py-3 text-base sm:w-auto sm:px-6" onClick={() => setQuick(firstChannel ? { channel: firstChannel } : {})}>
+          ＋ {firstChannel ? `오늘 ${CHANNEL_LABEL[firstChannel]} 매출 기록하기` : '오늘 매출 기록하기'}
         </Button>
+        {!data.sales.length && <p className="-mt-2 text-sm text-slate-600">수수료율이나 원가율을 몰라도 매출과 주문 수만 먼저 저장할 수 있어요.</p>}
+        {hint && (
+          <Notice tone="info">
+            <p className="font-medium">첫 기록을 저장했어요</p>
+            <p className="mt-0.5 text-sm">{hint.text}</p>
+            <div className="mt-2 flex flex-wrap gap-2">
+              <Button size="sm" variant="primary" onClick={() => navigate('store', { section: hint.section })}>
+                지금 설정하기
+              </Button>
+              <Button size="sm" onClick={() => setHint(null)}>
+                나중에
+              </Button>
+            </div>
+          </Notice>
+        )}
 
         {/* ② 오늘 입력 현황 */}
         <TodayStatus
@@ -147,7 +166,11 @@ export function Dashboard() {
         <QuickEntry
           {...quick}
           onClose={() => setQuick(null)}
-          onSaved={(e) => setStatusDate(e.date)}
+          onSaved={(e) => {
+            setStatusDate(e.date);
+            // 첫 기록이면 방금 입력한 기록에 관련된 설정 하나만 제안
+            if (!data.sales.length) setHint(setupHint(data, e));
+          }}
           onOpenDetail={(e) => setDetail(structuredClone(data.sales.find((x) => x.id === e.id) ?? e))}
         />
       )}
@@ -258,7 +281,33 @@ function PeriodHeadline({ s, p }: { s: PeriodSummary; p: PeriodSummary }) {
           </p>
         </div>
       </div>
+      <SettlementTodos s={s} />
       {s.status.estimatedAmount > 0 && <PendingEstimates s={s} />}
+    </div>
+  );
+}
+
+/** 쿠폰 판단에 필요한데 비어 있는 할인·수수료: 배달앱별로 묶어 정산 반영 화면으로 */
+function SettlementTodos({ s }: { s: PeriodSummary }) {
+  const data = useData();
+  const { navigate } = useApp();
+  const todos = useMemo(() => settlementTodos(data, s.range), [data, s.range]);
+  if (!todos.length) return null;
+  const name = (id: string) => data.routes.find((r) => r.id === id)?.name ?? '(삭제된 경로)';
+  return (
+    <div aria-label="정산 반영할 것" className="rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-900 ring-1 ring-amber-200">
+      <p className="font-medium">쿠폰 판단에 필요한 할인·수수료가 비어 있어요</p>
+      <ul className="mt-1 space-y-1">
+        {todos.map((t) => (
+          <li key={`${t.routeId}|${t.channel}`}>
+            <button type="button" className="text-left underline" onClick={() => navigate('sales', { tab: 'settle', route: t.routeId, channel: t.channel, from: t.start, to: t.end })}>
+              {name(t.routeId)}({CHANNEL_LABEL[t.channel]}) {shortDate(t.start)}{t.end !== t.start ? `~${shortDate(t.end)}` : ''}
+              {t.discountUnknown > 0 && ` · 할인액 미입력 ${t.discountUnknown}건`}
+              {t.feeMissing > 0 && ` · 수수료 미입력 ${t.feeMissing}건`} → 정산 반영하기
+            </button>
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }
@@ -273,6 +322,8 @@ function PendingEstimates({ s }: { s: PeriodSummary }) {
   const shown = all ? items : items.slice(0, 4);
   const go = (it: PendingItem) => {
     if (it.kind === 'period') return navigate('sales', { tab: 'period', month: monthOf(it.start) });
+    // 수수료는 정산서로 여러 날을 한 번에 채우는 정산 반영 화면으로, 그 밖의 비용은 그 기록만 모은 목록으로
+    if (it.kind === 'fee' && data.routes.find((r) => r.id === it.routeId)?.platformId) return navigate('sales', { tab: 'settle', route: it.routeId!, channel: it.channel!, from: it.start, to: it.end });
     navigate('sales', { tab: 'daily', month: monthOf(it.end), from: it.start, to: it.end, route: it.routeId!, channel: it.channel!, cats: it.categories.join(',') });
   };
   return (

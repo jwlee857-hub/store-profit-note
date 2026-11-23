@@ -20,14 +20,14 @@ import {
   th,
   thR,
 } from '../components/ui';
-import { GAP_NOTE, channelSalesCalc, comparableValue, compareCalc, computeSummary, expectedProfitChange, getMetric, profitForDisplay, type PeriodSummary } from '../domain/calc';
+import { GAP_NOTE, channelSalesCalc, comparableValue, compareCalc, compareValues, computeSummary, expectedProfitChange, getMetric, profitForDisplay, type PeriodSummary } from '../domain/calc';
 import { RecordGapsNotice } from '../components/RecordGaps';
 import { addDays, daysInclusive, formatRange, isValidRange, previousRange, todayStr } from '../domain/dates';
 import { couponText, fmt, fmtKpiTarget, fmtPp, fmtSigned, type Unit } from '../domain/format';
 import { KPI_MODE_LABEL, daysLeft, judgeKpiTarget, referenceDate, reviewUnavailableReason } from '../domain/periods';
 import { CHANNEL_LABEL, DECISION_LABEL, METRIC_DEFINITION, METRIC_META, STATUS_LABEL, easyMetricName, metricLabel, metricLabelEasy } from '../domain/labels';
 import { DiscountEfficiencyNote } from '../components/DiscountEfficiency';
-import { deliveryChangeText, reviewContext, type ReviewContext } from '../domain/review';
+import { deliveryChangeText, menuAverageFoodCount, reviewContext, scopeToRoute, withChannelFrom, type ReviewContext } from '../domain/review';
 import { CHANNELS, type Calc, type Channel, type DateRange, type Decision, type MetricRef, type Solution, type SolutionStatus } from '../domain/types';
 import { useApp, useData } from '../state/AppContext';
 
@@ -97,8 +97,16 @@ function PerformanceBody({ solution }: { solution: Solution }) {
   const [nextCoupon, setNextCoupon] = useState<number | null>(solution.review.nextCouponAmount);
   const valid = isValidRange(before) && isValidRange(after);
   const overlap = valid && before.start <= after.end && after.start <= before.end;
-  const b = useMemo(() => (valid ? computeSummary(data, before) : null), [data, before, valid]);
-  const a = useMemo(() => (valid ? computeSummary(data, after) : null), [data, after, valid]);
+  // 한 배달앱만 대상인 배달 계획: 배달 숫자는 그 배달앱 주문만 집계한다 (화면에 표시한 대상 범위와 같게). 가게 전체 합계는 그대로
+  const scopeRoute = solution.target === 'delivery' && solution.coupon.routeId && data.routes.some((r) => r.id === solution.coupon.routeId) ? solution.coupon.routeId : null;
+  const summarize = (r: DateRange) => {
+    const full = computeSummary(data, r);
+    return scopeRoute ? withChannelFrom(full, computeSummary(scopeToRoute(data, 'delivery', scopeRoute), r), 'delivery') : full;
+  };
+  const b = useMemo(() => (valid ? summarize(before) : null), [data, before, valid]); // eslint-disable-line react-hooks/exhaustive-deps
+  const a = useMemo(() => (valid ? summarize(after) : null), [data, after, valid]); // eslint-disable-line react-hooks/exhaustive-deps
+  const routeName = scopeRoute ? data.routes.find((r) => r.id === scopeRoute)!.name : null;
+  const coupon = couponText(solution.coupon, routeName);
   const problem = data.problems.find((p) => p.id === solution.problemId);
   // 저장된 비교 기간이 없을 때만 자동 판단: 시작 전이거나 실행 후 기간에 매출 입력이 없으면 비교하지 않는다
   const hasSavedRanges = !!(solution.review.before && solution.review.after);
@@ -125,7 +133,7 @@ function PerformanceBody({ solution }: { solution: Solution }) {
     <div className="mt-4 space-y-4">
       <Card
         title={solution.name}
-        subtitle={`${solution.target === 'common' ? '공통 운영' : CHANNEL_LABEL[solution.target]} 대상 · 실행 ${solution.start ?? '미정'} ~ ${solution.end ?? '미정'}${couponText(solution.coupon) ? ` · ${couponText(solution.coupon)}` : ''}${problem ? ` · 문제: ${problem.name}` : ''}`}
+        subtitle={`${solution.target === 'common' ? '공통 운영' : CHANNEL_LABEL[solution.target]} 대상 · 실행 ${solution.start ?? '미정'} ~ ${solution.end ?? '미정'}${coupon ? ` · ${coupon}` : ''}${problem ? ` · 문제: ${problem.name}` : ''}`}
         actions={
           <>
             {problem && (
@@ -210,7 +218,7 @@ function PerformanceBody({ solution }: { solution: Solution }) {
 
       {!unavailable && (
         <>
-      {b && a && <Comparisons solution={solution} b={b} a={a} />}
+      {b && a && <Comparisons solution={solution} b={b} a={a} routeName={routeName} />}
         </>
       )}
 
@@ -239,10 +247,17 @@ function PerformanceBody({ solution }: { solution: Solution }) {
           <div className="grid gap-3 md:grid-cols-2">
             <Field
               label="다음 기간 쿠폰 금액 (선택)"
-              hint={`다음 실행 계획을 만들 때 쿠폰 금액 기본값으로 불러와요. 쿠폰을 안 걸기로 했으면 0을 넣으세요.${couponText(solution.coupon) ? ` 이번 계획: ${couponText(solution.coupon)}` : ''}`}
+              hint={`‘이 조건으로 2주 재시험’을 누를 때만 새 계획의 쿠폰 금액으로 넘어가요. 비우면 미정, 쿠폰을 그만 걸기로 했으면 0원(중단).${coupon ? ` 이번 계획: ${coupon}` : ''}`}
             >
               {(id) => <NumberInput id={id} value={nextCoupon} onChange={setNextCoupon} suffix="원" placeholder="미정" />}
             </Field>
+            <div className="flex flex-wrap items-end gap-2">
+              <Button size="sm" onClick={() => setNextCoupon(null)}>미정</Button>
+              <Button size="sm" onClick={() => setNextCoupon(0)}>0원으로 중단</Button>
+              <span className="self-center text-sm text-slate-700" aria-live="polite">
+                {nextCoupon === null ? '다음 쿠폰: 미정' : nextCoupon === 0 ? '다음 쿠폰: 0원 — 쿠폰 중단' : `다음 쿠폰: ${fmt(nextCoupon, 'won')}`}
+              </span>
+            </div>
           </div>
           <div className="flex flex-wrap items-end gap-3">
             <Field label="실행 계획 상태">
@@ -250,6 +265,16 @@ function PerformanceBody({ solution }: { solution: Solution }) {
             </Field>
             <Button variant="primary" onClick={saveReview} disabled={!valid}>
               비교 기간과 판단 저장
+            </Button>
+            <Button
+              onClick={() => {
+                // 판단을 저장한 뒤 그 조건(대상 앱·다음 쿠폰액·최소 주문액·핵심 지표)으로 새 초안을 연다. 저장 전까지 고칠 수 있다
+                saveReview();
+                navigate('solutions', { retest: solution.id });
+              }}
+              disabled={!valid}
+            >
+              이 조건으로 2주 재시험
             </Button>
             {solution.review.reviewedAt && <span className="text-xs text-slate-500">마지막 기록 {new Date(solution.review.reviewedAt).toLocaleString('ko-KR')}</span>}
           </div>
@@ -302,7 +327,7 @@ function easyRow(ref: MetricRef, kind?: CmpRow['kind']): CmpRow {
   };
 }
 
-function Comparisons({ solution, b, a }: { solution: Solution; b: PeriodSummary; a: PeriodSummary }) {
+function Comparisons({ solution, b, a, routeName }: { solution: Solution; b: PeriodSummary; a: PeriodSummary; routeName: string | null }) {
   const ch: Channel | 'all' = solution.target === 'common' ? 'all' : solution.target;
   const scopeRows: CmpRow[] =
     ch === 'all'
@@ -461,7 +486,7 @@ function Comparisons({ solution, b, a }: { solution: Solution; b: PeriodSummary;
   return (
     <>
       <RecordGapsNotice periods={[['실행 전', b], ['실행 후', a]]} />
-      {ch === 'delivery' && <CouponDecisionSummary solution={solution} b={b} a={a} ctx={ctx} />}
+      {ch === 'delivery' && <CouponDecisionSummary solution={solution} b={b} a={a} ctx={ctx} routeName={routeName} />}
       <Card title="영업이익 변화: 예상과 실제" subtitle="예상은 계획할 때 적은 값, 실제는 실행 후 기간 − 실행 전 기간의 가게 전체 영업이익입니다.">
         <div className="grid grid-cols-2 gap-3">
           <div className="rounded-lg bg-slate-50 p-3">
@@ -676,10 +701,10 @@ function Comparisons({ solution, b, a }: { solution: Solution; b: PeriodSummary;
  * 배달 대상 계획의 첫 화면: 다음 쿠폰을 정할 때 보는 세 숫자와 해석에 필요한 맥락.
  * 전후 차이일 뿐 쿠폰 효과로 단정하지 않는다.
  */
-function CouponDecisionSummary({ solution, b, a, ctx }: { solution: Solution; b: PeriodSummary; a: PeriodSummary; ctx: ReviewContext }) {
+function CouponDecisionSummary({ solution, b, a, ctx, routeName }: { solution: Solution; b: PeriodSummary; a: PeriodSummary; ctx: ReviewContext; routeName: string | null }) {
   const three: { n: string; label: string; ref: MetricRef; kind: 'normal' | 'profit' }[] = [
-    { n: '①', label: '배달 한 건당 남은 돈', ref: { key: 'directProfitPerOrder', channel: 'delivery' }, kind: 'normal' },
-    { n: '②', label: '배달 전체에서 남은 돈', ref: { key: 'directProfit', channel: 'delivery' }, kind: 'profit' },
+    { n: '①', label: routeName ? `${routeName} 배달 한 건당 남은 돈` : '배달 한 건당 남은 돈', ref: { key: 'directProfitPerOrder', channel: 'delivery' }, kind: 'normal' },
+    { n: '②', label: routeName ? `${routeName} 배달 전체에서 남은 돈` : '배달 전체에서 남은 돈', ref: { key: 'directProfit', channel: 'delivery' }, kind: 'profit' },
     { n: '③', label: '가게 전체 영업이익', ref: { key: 'operatingProfit', channel: 'all' }, kind: 'profit' },
   ];
   const ordersRef: MetricRef = { key: 'orders', channel: 'delivery' };
@@ -689,8 +714,11 @@ function CouponDecisionSummary({ solution, b, a, ctx }: { solution: Solution; b:
   const [ordB, ordA] = pair(ordersRef);
   const nums = [perB, perA, totB, totA, ordB, ordA].map(comparableValue);
   // 주문 수가 모든 날에 있어야(건당 값이 계산된 기준과 같아야) 문장으로 묶는다
-  const sentence = nums.every((v) => v !== null) && !ordB.basis && !ordA.basis ? deliveryChangeText([nums[0]!, nums[1]!], [nums[4]!, nums[5]!], [nums[2]!, nums[3]!]) : null;
+  const sentence = nums.every((v) => v !== null) && !ordB.basis && !ordA.basis ? deliveryChangeText([nums[0]!, nums[1]!], [nums[4]!, nums[5]!], [nums[2]!, nums[3]!], routeName ? `${routeName} 배달 전체` : undefined) : null;
   const others = (['hall', 'takeout'] as Channel[]).filter((c) => b.channels[c].entryCount || a.channels[c].entryCount);
+  const data = useData();
+  const foodB = menuAverageFoodCount(data, b, 'delivery');
+  const foodA = menuAverageFoodCount(data, a, 'delivery');
   const goReview = () => {
     const el = document.getElementById('review-record');
     el?.scrollIntoView?.({ behavior: 'smooth', block: 'start' });
@@ -698,6 +726,11 @@ function CouponDecisionSummary({ solution, b, a, ctx }: { solution: Solution; b:
   };
   const cell = (r: MetricRef, kind: 'normal' | 'profit', unit: Unit) => {
     const [x, y] = pair(r);
+    // 비용 일부 미입력(미확정)이어도 입력된 값끼리의 증감은 '미확정'을 붙여 보여준다. 빠진 매출 기록이 있으면 보류(compareCalc)
+    const cx = comparableValue(x);
+    const cy = comparableValue(y);
+    const base = cx !== null && cy !== null ? compareValues(cx, cy, kind) : compareCalc(x, y, kind);
+    const cmp = cx !== null && cy !== null && (x.value === null || y.value === null) ? { ...base, note: [base.note, '미확정'].filter(Boolean).join(' · ') } : base;
     return (
       <>
         <div className="mt-1 flex flex-wrap items-baseline gap-x-1.5 gap-y-0.5 text-sm">
@@ -706,14 +739,14 @@ function CouponDecisionSummary({ solution, b, a, ctx }: { solution: Solution; b:
           <span className="sr-only">에서</span>
           <CalcValue calc={y} unit={unit} />
         </div>
-        <DeltaText cmp={compareCalc(x, y, kind)} unit={unit} higherIsBetter={METRIC_META[r.key].higherIsBetter} />
+        <DeltaText cmp={cmp} unit={unit} higherIsBetter={METRIC_META[r.key].higherIsBetter} />
       </>
     );
   };
   return (
     <Card
       title="다음 쿠폰을 정할 때 볼 세 숫자"
-      subtitle={`실행 전 ${formatRange(b.range)} → 실행 후 ${formatRange(a.range)}${couponText(solution.coupon) ? ` · ${couponText(solution.coupon)}` : ''}`}
+      subtitle={`실행 전 ${formatRange(b.range)} → 실행 후 ${formatRange(a.range)}${couponText(solution.coupon, routeName) ? ` · ${couponText(solution.coupon, routeName)}` : ''}`}
       actions={
         <Button size="sm" variant="primary" onClick={goReview}>
           결과 판단 기록하기
@@ -730,7 +763,17 @@ function CouponDecisionSummary({ solution, b, a, ctx }: { solution: Solution; b:
           </div>
         ))}
       </div>
-      {sentence && <p className="mt-3 text-base font-medium text-slate-900">{sentence}</p>}
+      <p className="mt-2 text-xs font-medium text-slate-700">
+        {routeName ? `${routeName} 전체의 전후 변화` : '배달 전체의 전후 변화'} · 쿠폰을 쓴 주문과 안 쓴 주문의 손익은 나누지 않았어요
+        {routeName && ' · 배달 전체에 걸친 기간 비용(광고비 등)은 빼고 계산'}
+        {solution.coupon.usedCount !== null && ` · 쿠폰 사용 ${solution.coupon.usedCount.toLocaleString('ko-KR')}건(사장님 입력)`}
+      </p>
+      {sentence && <p className="mt-2 text-base font-medium text-slate-900">{sentence}</p>}
+      {foodB + foodA > 0 && (
+        <p className="mt-1 text-xs text-amber-800">
+          근거: 식재료비는 메뉴 평균 원가율로 추정했어요 (실행 전 {foodB}건 · 실행 후 {foodA}건). 실제 원가율을 넣으면 ①·②·③이 바뀔 수 있어요.
+        </p>
+      )}
       <p className="mt-1 text-xs text-slate-600">
         ①·②는 배달 매출에서 배달 직접 비용(식재료·수수료·배달비·포장비 등)만 뺀 금액, ③은 월세·인건비 같은 공통비까지 뺀 가게 전체 금액이에요. 실행 전후 차이라 날씨·노출·다른 판매 방식 변화가 섞여 있어 쿠폰 때문이라고 단정할 수 없어요.
       </p>

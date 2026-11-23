@@ -1,6 +1,6 @@
 // 데이터 모델 정의. UI와 무관한 순수 타입만 둔다.
 
-export const SCHEMA_VERSION = 7 as const;
+export const SCHEMA_VERSION = 8 as const;
 
 export type Channel = 'hall' | 'delivery' | 'takeout';
 export const CHANNELS: Channel[] = ['hall', 'delivery', 'takeout'];
@@ -230,6 +230,11 @@ export interface PeriodCost {
   amount: number;
   source: ValueSource;
   memo: string;
+  /**
+   * 배달앱 정산서의 기간 합계(수수료)일 때 그 배달앱(주문 경로). 이 범위의 일별 계산·추정 수수료는 이 금액으로 대체된다.
+   * 이전 데이터에는 없다(일반 기간 비용).
+   */
+  routeId?: string;
 }
 
 export interface CustomerMetric {
@@ -318,10 +323,16 @@ export interface SolutionReview {
 
 /** 쿠폰·할인 조건 (선택) — v6. 모르면 null */
 export interface CouponTerms {
-  /** 쿠폰 1장 금액(원) */
+  /** 쿠폰 1장 금액(원). null = 미정, 0 = 쿠폰 중단 */
   amount: number | null;
   /** 최소 주문금액(원) */
   minOrder: number | null;
+  /** 대상 배달앱(주문 경로). null = 배달 전체 — v8 */
+  routeId: string | null;
+  /** 시험 전에 쓰던 쿠폰 금액(원). null = 모름 — v8 */
+  previousAmount: number | null;
+  /** 실행 기간 쿠폰 사용 건수. 사장님이 실제로 아는 경우에만 — v8 */
+  usedCount: number | null;
 }
 
 export interface Solution {

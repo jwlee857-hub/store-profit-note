@@ -120,7 +120,7 @@ export function recordGaps(data: Pick<AppData, 'sales'>, s: PeriodSummary): Reco
  * 예: "한 건당 141원 덜 남았지만 주문이 69건 늘어 배달 전체에서는 276,394원 더 남았어요."
  * 원인을 말하지 않는다(쿠폰 효과로 단정하지 않음).
  */
-export function deliveryChangeText(per: [number, number], orders: [number, number], total: [number, number]): string {
+export function deliveryChangeText(per: [number, number], orders: [number, number], total: [number, number], scope = '배달 전체'): string {
   const dp = Math.round(per[1]) - Math.round(per[0]);
   const dq = Math.round(orders[1]) - Math.round(orders[0]);
   const dt = Math.round(total[1]) - Math.round(total[0]);
@@ -128,6 +128,40 @@ export function deliveryChangeText(per: [number, number], orders: [number, numbe
   const perPart = dp === 0 ? '한 건당 남은 돈은 같았' : `한 건당 ${won(dp)} ${dp < 0 ? '덜' : '더'} 남았`;
   const join = dp !== 0 && dt !== 0 && Math.sign(dp) !== Math.sign(dt) ? '지만' : '고';
   const qPart = dq === 0 ? '주문 수는 같아' : `주문이 ${Math.abs(dq).toLocaleString('ko-KR')}건 ${dq > 0 ? '늘어' : '줄어'}`;
-  const tPart = dt === 0 ? '배달 전체에서 남은 돈은 같았어요.' : `배달 전체에서는 ${won(dt)} ${dt > 0 ? '더' : '덜'} 남았어요.`;
+  const tPart = dt === 0 ? `${scope}에서 남은 돈은 같았어요.` : `${scope}에서는 ${won(dt)} ${dt > 0 ? '더' : '덜'} 남았어요.`;
   return `${perPart}${join} ${qPart} ${tPart}`;
+}
+
+// ───────── 대상 배달앱만 집계 ─────────
+
+/**
+ * 계획이 한 배달앱만 대상으로 할 때: 그 판매 방식의 기록·'매출 없음' 확인·경로·기간 비용을 그 배달앱 것만 남긴다(다른 판매 방식은 그대로).
+ * 판매 방식 전체에 걸친 기간 비용(배달 광고비 등)은 한 배달앱 몫을 알 수 없어 빼고, 그 배달앱의 정산서 기간 합계만 남긴다.
+ */
+// shortcut: 판매 방식 전체에 걸친 기간 비용(광고비 등)은 앱별로 나누지 않고 뺀다, 앱별 광고비를 따로 기록하게 되면 그 몫을 넣는다
+export function scopeToRoute(data: AppData, channel: Channel, routeId: string): AppData {
+  return {
+    ...data,
+    sales: data.sales.filter((e) => e.channel !== channel || e.routeId === routeId),
+    salesChecks: data.salesChecks.filter((c) => c.channel !== channel || c.routeId === routeId),
+    routes: data.routes.map((r) => (r.id === routeId || !r.channels.includes(channel) ? r : { ...r, channels: r.channels.filter((c) => c !== channel) })),
+    periodCosts: data.periodCosts.filter((pc) => pc.attribution !== channel || pc.routeId === routeId),
+  };
+}
+
+/** 가게 전체 합계는 그대로 두고 한 판매 방식만 대상 배달앱 집계로 바꾼 요약 */
+export function withChannelFrom(full: PeriodSummary, scoped: PeriodSummary, channel: Channel): PeriodSummary {
+  return { ...full, channels: { ...full.channels, [channel]: scoped.channels[channel] } };
+}
+
+/** 계산에 들어간 기록 중 식재료비를 메뉴 평균 원가율로 추정한 기록 수 (성과 화면의 근거 표시용) */
+export function menuAverageFoodCount(data: Pick<AppData, 'sales'>, s: PeriodSummary, channel?: Channel): number {
+  const skipped = new Set([...s.unrecordedDays, ...s.pairedExcluded]);
+  return data.sales.filter((e) => {
+    if (!inRange(e.date, s.range) || skipped.has(e.date) || (channel && e.channel !== channel)) return false;
+    const f = e.costs.food;
+    if (f.actual !== null || f.estimated === null) return false;
+    // v7 이후는 계산 내용으로, 이전 기록은 저장 당시 근거 문구로 판별
+    return f.calc ? f.calc.method === 'foodRate' && f.calc.source === 'menuAverage' : /메뉴 \d+개 단순 평균 원가율/.test(f.estimateBasis);
+  }).length;
 }

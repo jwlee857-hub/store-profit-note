@@ -79,3 +79,8 @@ export function shortDate(d: DateStr): string {
 export function formatRange(r: DateRange): string {
   return `${r.start.replace(/-/g, '.')} ~ ${r.end.replace(/-/g, '.')}`;
 }
+
+/** 다음 주 월요일 (오늘이 월요일이면 7일 뒤) */
+export function nextMonday(today: DateStr): DateStr {
+  return addDays(today, (8 - weekday(today)) % 7 || 7);
+}

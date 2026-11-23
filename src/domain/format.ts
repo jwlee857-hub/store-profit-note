@@ -90,10 +90,15 @@ export function josa(word: string, pair: '이/가' | '은/는' | '을/를' | '�
   return word + (has ? withBatchim : without);
 }
 
-/** 쿠폰 조건 한 줄: "쿠폰 3,000원 · 최소 주문 15,000원". 아무것도 없으면 null */
-export function couponText(c: { amount: number | null; minOrder: number | null } | null | undefined): string | null {
-  if (!c || (c.amount === null && c.minOrder === null)) return null;
-  const parts = [c.amount === null ? '쿠폰 금액 미정' : c.amount === 0 ? '쿠폰 없음' : `쿠폰 ${fmt(c.amount, 'won')}`];
+/**
+ * 쿠폰 조건 한 줄: "배달앱 A · 쿠폰 1,000원 → 3,000원 · 최소 주문 15,000원". 아무것도 없으면 null.
+ * 금액 null = 미정, 0 = 쿠폰 중단(0원)
+ */
+export function couponText(c: { amount: number | null; minOrder: number | null; previousAmount?: number | null } | null | undefined, routeName?: string | null): string | null {
+  if (!c || (c.amount === null && c.minOrder === null && (c.previousAmount ?? null) === null)) return null;
+  const amt = (n: number | null) => (n === null ? '미정' : n === 0 ? '0원(중단)' : fmt(n, 'won'));
+  const parts = routeName ? [routeName] : [];
+  parts.push(c.previousAmount !== null && c.previousAmount !== undefined ? `쿠폰 ${amt(c.previousAmount)} → ${amt(c.amount)}` : c.amount === null ? '쿠폰 금액 미정' : c.amount === 0 ? '쿠폰 0원(중단)' : `쿠폰 ${fmt(c.amount, 'won')}`);
   if (c.minOrder !== null) parts.push(`최소 주문 ${fmt(c.minOrder, 'won')}`);
   return parts.join(' · ');
 }
