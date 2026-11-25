@@ -2,7 +2,7 @@
 // 정산서·영수증 금액으로 채우면 '추정 포함'이 사라지는지 목록으로 만든다.
 // 설정값을 그대로 적용해 계산한 금액(수수료율·건당 금액·직접 지정 원가율)은 정상 계산이므로 할 일에 넣지 않는다.
 // (정산 금액을 따로 넣고 싶으면 기록의 상세 화면에서 넣을 수 있고, 넣으면 그 금액만 합계에 반영된다)
-import { effectiveCost } from './calc';
+import { effectiveCost, settledByPeriod } from './calc';
 import { costKindOf } from './costBasis';
 import { inRange } from './dates';
 import { ATTRIBUTION_LABEL, CATEGORY_LABEL, CHANNEL_LABEL, DIRECT_LABEL } from './labels';
@@ -34,8 +34,10 @@ export interface PendingItem {
 const FEE: DirectCategory[] = ['brokerage', 'payment'];
 
 /** 이 기록의 이 항목이 추정값(가정 포함·근거 불분명)인가. 실제값이 있거나 설정값으로 계산한 값이면 아니다 */
-function isEstimated(e: SalesEntry, cat: DirectCategory): boolean {
+function isEstimated(e: SalesEntry, cat: DirectCategory, periodCosts: AppData['periodCosts'] = []): boolean {
   if (cat === 'payment' && e.bundledFee) return false;
+  // 정산서 기간 합계로 대체된 수수료는 확인할 일이 아니다
+  if ((cat === 'brokerage' || cat === 'payment') && settledByPeriod(periodCosts, e)) return false;
   return costKindOf(cat, e.costs[cat], e) === 'estimated';
 }
 
@@ -90,7 +92,7 @@ export function pendingEstimates(data: Pick<AppData, 'sales' | 'routes' | 'perio
         run = null;
       };
       for (const e of list) {
-        const est = g.cats.filter((c) => isEstimated(e, c));
+        const est = g.cats.filter((c) => isEstimated(e, c, data.periodCosts));
         if (!est.length) {
           // 이 항목에 실제값이나 설정값으로 계산한 값이 있는 기록은 확인할 것이 없는 날이므로 기간을 끊는다 (해당 항목이 없는 기록은 건너뜀)
           if (g.cats.some((c) => effectiveCost(e.costs[c]).status !== 'missing')) flush();

@@ -22,7 +22,8 @@ function baseData(): AppData {
   const d = emptyData();
   d.store = {
     name: '테스트',
-    channels: ['hall', 'delivery', 'takeout'],
+    // 홀만 운영: 배달·포장 기록은 운영 목록 밖이라 그 기록만으로 집계한다 (입력 현황 판정은 coverage.test에서)
+    channels: ['hall'],
     regularOpenDays: [0, 1, 2, 3, 4, 5, 6],
     openTime: '11:00',
     closeTime: '21:00',

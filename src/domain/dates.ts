@@ -79,3 +79,37 @@ export function shortDate(d: DateStr): string {
 export function formatRange(r: DateRange): string {
   return `${r.start.replace(/-/g, '.')} ~ ${r.end.replace(/-/g, '.')}`;
 }
+
+/** 다음 주 월요일 (오늘이 월요일이면 7일 뒤) */
+export function nextMonday(today: DateStr): DateStr {
+  return addDays(today, (8 - weekday(today)) % 7 || 7);
+}
+
+/** "10월 1~31일" · 달이 다르면 "10월 19일~11월 1일" */
+export function krRange(r: DateRange): string {
+  const m = (d: DateStr) => Number(d.slice(5, 7));
+  const day = (d: DateStr) => Number(d.slice(8, 10));
+  return m(r.start) === m(r.end) && r.start.slice(0, 4) === r.end.slice(0, 4) ? `${m(r.start)}월 ${day(r.start)}~${day(r.end)}일` : `${m(r.start)}월 ${day(r.start)}일~${m(r.end)}월 ${day(r.end)}일`;
+}
+
+/** "10월 2일" */
+export function krDate(d: DateStr): string {
+  return `${Number(d.slice(5, 7))}월 ${Number(d.slice(8, 10))}일`;
+}
+
+/** 달력 한 달 전체(1일~말일)인가 */
+export function isFullMonth(r: DateRange): boolean {
+  return isValidRange(r) && r.start.slice(8) === '01' && r.start.slice(0, 7) === r.end.slice(0, 7) && addDays(r.end, 1).slice(8) === '01';
+}
+
+/** r이 시작하는 달의 지난달 전체 (10월 → 9월 1~30일) */
+export function previousMonth(r: DateRange): DateRange {
+  const end = addDays(`${r.start.slice(0, 7)}-01`, -1);
+  return { start: `${end.slice(0, 7)}-01`, end };
+}
+
+/** "9.1~9.30" */
+export function dotRange(r: DateRange): string {
+  const f = (d: DateStr) => `${Number(d.slice(5, 7))}.${Number(d.slice(8, 10))}`;
+  return `${f(r.start)}~${f(r.end)}`;
+}

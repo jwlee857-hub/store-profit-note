@@ -1,8 +1,12 @@
 // 입력된 숫자에 기반한 규칙 진단. 관찰 사실과 확인할 가설을 분리해서 돌려준다.
 // 원인을 단정하는 문구는 만들지 않는다.
 import {
+  COVERAGE_LABEL,
   bucketTotal,
   channelQuantity,
+  comparableValue,
+  discountCalc,
+  salesComplete,
   compareCalc,
   computeComparison,
   decompose,
@@ -16,7 +20,7 @@ import {
   type PeriodSummary,
 } from './calc';
 import { repurchaseRate } from './customers';
-import { WEEKDAY_LABELS, addDays, daysInclusive, inRange, shortDate as shortDay } from './dates';
+import { WEEKDAY_LABELS, addDays, daysInclusive, inRange, isFullMonth, shortDate as shortDay } from './dates';
 import { fmt, fmtSigned, josa } from './format';
 import { CATEGORY_LABEL, CHANNEL_LABEL, METRIC_META, metricLabel } from './labels';
 import {
@@ -39,6 +43,8 @@ export interface ChannelChangeRow {
   cur: number;
   delta: number;
   share: number | null; // 기여율(%) — 상쇄가 없을 때만
+  /** 매출 기록이 빠진 경로·날이 있어 prev·cur가 부분 합계 (증감 비교 보류) */
+  gap: boolean;
 }
 
 export interface QuantityPriceRow {
@@ -102,7 +108,8 @@ export interface DiagnosisResult {
   prev: PeriodSummary;
   cur: PeriodSummary;
   channelChanges: ChannelChangeRow[];
-  totalDelta: number;
+  /** 빠진 기록이 있으면 null (부분 합계끼리 빼지 않는다) */
+  totalDelta: number | null;
   offsetting: boolean;
   channelNote: string;
   quantityPrice: QuantityPriceRow[];
@@ -115,8 +122,8 @@ export interface DiagnosisResult {
 const rel = (prev: number, cur: number) => (prev === 0 ? null : (cur - prev) / Math.abs(prev));
 const THRESHOLD = 0.05;
 
-export function diagnose(data: AppData, problem: Pick<Problem, 'analysis' | 'compare' | 'channel' | 'target' | 'targetValue'>): DiagnosisResult {
-  const { s: cur, p: prev } = computeComparison(data, problem.analysis, problem.compare);
+export function diagnose(data: AppData, problem: Pick<Problem, 'analysis' | 'compare' | 'channel' | 'target' | 'targetValue' | 'weekdays'>): DiagnosisResult {
+  const { s: cur, p: prev } = computeComparison(data, problem.analysis, problem.compare, problem.weekdays);
   return diagnoseSummaries(data, prev, cur, problem);
 }
 
@@ -135,16 +142,19 @@ export function diagnoseSummaries(
     cur: cur.channels[ch].netSales,
     delta: cur.channels[ch].netSales - prev.channels[ch].netSales,
     share: null,
+    gap: !salesComplete(prev.channels[ch]) || !salesComplete(cur.channels[ch]),
   }));
-  const totalDelta = channelChanges.reduce((s, r) => s + r.delta, 0);
-  const nonZero = channelChanges.filter((r) => Math.round(r.delta) !== 0);
+  const anyGap = channelChanges.some((r) => r.gap);
+  const totalDelta = anyGap ? null : channelChanges.reduce((s, r) => s + r.delta, 0);
+  const nonZero = channelChanges.filter((r) => !r.gap && Math.round(r.delta) !== 0);
   const offsetting = nonZero.some((r) => r.delta > 0) && nonZero.some((r) => r.delta < 0);
   let channelNote: string;
-  if (Math.round(totalDelta) === 0 && nonZero.length === 0) channelNote = '두 기간의 판매 방식별 매출 차이가 없습니다.';
+  if (anyGap) channelNote = '매출 기록이 빠진 판매 방식이 있어 그 판매 방식의 증감과 전체 기여율은 계산하지 않습니다. 빠진 기록을 채우면 비교합니다.';
+  else if (Math.round(totalDelta!) === 0 && nonZero.length === 0) channelNote = '두 기간의 판매 방식별 매출 차이가 없습니다.';
   else if (offsetting)
     channelNote = '늘어난 판매 방식과 줄어든 판매 방식이 서로 상쇄되어, 전체 변화에 대한 기여율(%)은 제시하지 않습니다. 판매 방식별 증감액을 함께 보세요.';
   else {
-    for (const r of channelChanges) r.share = totalDelta === 0 ? null : (r.delta / totalDelta) * 100;
+    for (const r of channelChanges) r.share = totalDelta === 0 ? null : (r.delta / totalDelta!) * 100;
     channelNote = '모든 판매 방식이 같은 방향으로 변해 기여율을 함께 표시합니다.';
   }
 
@@ -205,8 +215,8 @@ export function diagnoseSummaries(
       });
     }
   }
-  const prevSales = prev.totalSales.value ?? prev.totalSales.provisional ?? 0;
-  const curSales = cur.totalSales.value ?? cur.totalSales.provisional ?? 0;
+  const prevSales = comparableValue(prev.totalSales) ?? 0;
+  const curSales = comparableValue(cur.totalSales) ?? 0;
   for (const cat of COMMON_CATEGORIES) {
     const pb = prev.commonByCategory[cat];
     const cb = cur.commonByCategory[cat];
@@ -249,6 +259,28 @@ export function diagnoseSummaries(
   for (const ch of focus) {
     const p = prev.channels[ch];
     const c = cur.channels[ch];
+    // 성과 확인과 같은 기준: 기록이 빠진 판매 방식은 부분 합계로 증감·급감을 판정하지 않는다
+    if (!salesComplete(p) || !salesComplete(c)) {
+      const parts = (
+        [
+          ['비교 기간', p],
+          ['분석 기간', c],
+        ] as const
+      )
+        .filter(([, x]) => !salesComplete(x))
+        .map(([label, x]) => `${label} ${COVERAGE_LABEL[x.coverage.state === 'complete' ? 'partial' : x.coverage.state]}${x.coverage.missing.length ? `(빠진 경로·날 ${x.coverage.missing.length}곳)` : ''}`);
+      push({
+        id: `gap-${ch}`,
+        channel: ch,
+        tone: 'info',
+        title: `${CHANNEL_LABEL[ch]} 기록 확인 필요`,
+        impact: null,
+        fact: `${CHANNEL_LABEL[ch]} 매출 기록이 빠져 있어 비교를 보류했습니다: ${parts.join(', ')}. 입력된 기록만 더한 값은 완전한 실적이 아니라 증감·급감을 판정하지 않습니다.`,
+        hypotheses: ['빠진 날·경로의 매출을 기록하거나, 실제로 팔지 않았다면 매출 없음으로 확인하세요.'],
+        dataNeeded: [`${CHANNEL_LABEL[ch]}의 빠진 매출 기록`],
+      });
+      continue;
+    }
     if (!p.entryCount || !c.entryCount) {
       if (p.entryCount !== c.entryCount)
         push({
@@ -399,7 +431,8 @@ export function diagnoseSummaries(
       const parts = [one('비교 기간', p), one('분석 기간', c)].filter(Boolean);
       return parts.length ? ` (${parts.join(', ')})` : '';
     })();
-    if (dr0 !== null && dr1 !== null && dr1 - dr0 >= 0.01)
+    // 할인 금액을 다 아는 기간끼리만 비교한다 (모르는 할인을 0원으로 보지 않음)
+    if (dr0 !== null && dr1 !== null && dr1 - dr0 >= 0.01 && discountCalc(p).value !== null && discountCalc(c).value !== null)
       push({
         id: `${ch}-discount-up`,
         channel: ch,
@@ -488,11 +521,11 @@ export function diagnoseSummaries(
     if (s.entryCount === 0) caveats.push(`${label}에 매출 입력이 없습니다.`);
     if (s.status.missingCount) caveats.push(`${label}에 누락된 항목이 ${s.status.missingCount}개 있어 영업이익을 확정할 수 없습니다.`);
     if (s.status.estimatedAmount > 0) caveats.push(`${label} 비용 중 ${fmt(s.status.estimatedAmount, 'won')}은 모르는 값을 가정한 추정값입니다.`);    const detailMissing = CHANNELS.reduce((n, c) => n + s.channels[c].detailMissing, 0);
-    if (detailMissing) caveats.push(`${label}에 할인·환불 상세 없이 순매출만 입력한 기록이 ${detailMissing}건 있어, 할인 비율은 상세가 있는 기록만으로 계산합니다.`);
-    if (s.pairedExcluded.length)
-      caveats.push(`${label}에서도 분석 기간 미입력일과 같은 순서의 날(${s.pairedExcluded.map(shortDay).join(', ')})을 빼고 비교했습니다.`);
+    if (detailMissing) caveats.push(`${label}에 할인·환불 상세 없이 순매출만 입력한 기록이 ${detailMissing}건 있어, 할인 비율 변화는 판정하지 않습니다.`);
+    const gapCount = CHANNELS.reduce((n, c) => n + s.channels[c].coverage.missing.length, 0);
+    if (gapCount) caveats.push(`${label}에 매출 기록이 빠진 경로·날이 ${gapCount}곳 있어, 그 판매 방식과 가게 전체 합계는 부분 합계입니다.`);
     if (s.unrecordedDays.length)
-      caveats.push(`${label}의 미입력 영업일 ${s.unrecordedDays.length}일(${s.unrecordedDays.map(shortDay).join(', ')})은 매출·영업일 수·기간 비용 계산에서 뺐습니다.`);
+      caveats.push(`${label}에 마감 미입력 영업일 ${s.unrecordedDays.length}일(${s.unrecordedDays.map(shortDay).join(', ')})이 있어 그 기간 합계는 부분 합계입니다. 0원으로 보지 않습니다.`);
   }
 
   // 목표 지표
@@ -501,7 +534,7 @@ export function diagnoseSummaries(
   const meta = METRIC_META[problem.target.key];
   const kind = meta.unit === 'pct' ? 'ratio' : problem.target.key === 'operatingProfit' || problem.target.key === 'directProfit' ? 'profit' : 'normal';
   let achieved: boolean | null = null;
-  if (problem.targetValue !== null && current.value !== null)
+  if (problem.targetValue !== null && current.value !== null && !current.salesGap)
     achieved = meta.higherIsBetter ? current.value >= problem.targetValue : current.value <= problem.targetValue;
 
   return {
@@ -708,7 +741,32 @@ export const byImpact = <T extends Finding>(list: T[]): T[] =>
 /** "이익 영향 −317만 원" / "매출 영향 −28만 원". 금액이 없으면 null */
 export function impactText(f: Pick<Finding, 'impact' | 'impactBasis'>): string | null {
   if (f.impact === null) return null;
-  return `${f.impactBasis === 'sales' ? '매출 영향' : '이익 영향'} ${f.impact < 0 ? '−' : '+'}${fmtMan(f.impact)}`;
+  return `추정 ${f.impactBasis === 'sales' ? '매출 영향' : '이익 영향'} ${f.impact < 0 ? '−' : '+'}${fmtMan(f.impact)}`;
+}
+
+/** 영향 금액이 무엇으로 추정한 값인지 (가게 전체 이익의 실제 전후 차이와 구분하기 위한 이름) */
+export function impactName(f: Pick<Finding, 'id'>): string {
+  if (f.id === 'hall-visitors-down' || f.id === 'hall-visitors-up') return `${f.id.endsWith('down') ? '줄어든' : '늘어난'} 손님 수로 추정한 금액`;
+  if (/-orders-(down|up)$/.test(f.id)) return `${f.id.endsWith('down') ? '줄어든' : '늘어난'} 주문 수로 추정한 금액`;
+  return '이 변화로 추정한 금액';
+}
+
+/**
+ * 관찰 사실을 쉬운 말로: '최근 4주 홀 손님이 직전 4주보다 170명 줄었어요.'
+ * 첫 문장만 쓰고(계산 근거는 상세로), 원인을 덧붙이지 않는다.
+ */
+export function plainFact(f: Pick<Finding, 'fact'>, periodName: string, than: string): string {
+  const first = f.fact.split(/(?<=[다요])\.\s/)[0].replace(/\.$/, '');
+  const s = first
+    .replace('홀 방문 고객 수가', '홀 손님이')
+    .replace('비교 기간보다', than)
+    .replace(/\([−+-]?[\d.]+%\)/g, '')
+    .replace(/감소했습니다$/, '줄었어요')
+    .replace(/증가했습니다$/, '늘었어요')
+    .replace(/했습니다$/, '했어요')
+    .replace(/습니다$/, '어요')
+    .replace(/입니다$/, '이에요');
+  return `${periodName} ${s}.`;
 }
 
 /** 같은 판매 방식의 주문 단위 변화(평균 주문금액·할인 비율·주문당 비용·비용 비율)가 원인 후보인 관찰 사실 */
@@ -757,15 +815,33 @@ export function fmtMan(n: number): string {
  * 홈 상단 한 줄 요약. 실제 계산 결과로 만들고 원인을 단정하지 않는다.
  * 예: "매출은 비슷하지만 예상 영업이익이 289만 원 줄었어요."
  */
+/** 두 기간의 달력 일수가 다르면 총액 증감은 의미가 없다 (예: 61일 대 30일) → 영업일당으로 비교한다 */
+export const LENGTH_NOTE = '기간 길이가 달라 총액은 비교하지 않아요';
+export function perBusinessDay(c: Calc, s: Pick<PeriodSummary, 'businessDays'>): number | null {
+  const v = comparableValue(c);
+  return v === null || !s.businessDays ? null : v / s.businessDays;
+}
+
 export function homeHeadline(prev: PeriodSummary, cur: PeriodSummary): string {
   if (!cur.entryCount) return '선택한 기간에 매출 기록이 아직 없어요.';
   if (!prev.entryCount) return '비교할 이전 기간의 매출 기록이 없어 변화는 아직 계산하지 않아요.';
-  const s0 = prev.totalSales.value ?? prev.totalSales.provisional ?? null;
-  const s1 = cur.totalSales.value ?? cur.totalSales.provisional ?? null;
+  if (prev.totalSales.salesGap || cur.totalSales.salesGap) return '아직 기록하지 않은 판매 방식·경로가 있어 이전 기간과의 변화는 기록을 채운 뒤 계산해요.';
+  if (prev.calendarDays !== cur.calendarDays && !(isFullMonth(prev.range) && isFullMonth(cur.range))) {
+    const s0 = perBusinessDay(prev.totalSales, prev);
+    const s1 = perBusinessDay(cur.totalSales, cur);
+    const o0 = perBusinessDay(prev.operatingProfit, prev);
+    const o1 = perBusinessDay(cur.operatingProfit, cur);
+    const sales = s0 && s1 !== null ? `영업일당 매출 ${s1 >= s0 ? '+' : '−'}${Math.abs(((s1 - s0) / s0) * 100).toFixed(1)}%` : '영업일당 매출은 계산할 수 없음';
+    const word = cur.operatingProfit.value === null || prev.operatingProfit.value === null ? '영업이익(미확정)' : cur.operatingProfit.estimated || prev.operatingProfit.estimated ? '예상 영업이익' : '영업이익';
+    const profit = o0 !== null && o1 !== null ? `영업일당 ${word} ${fmtSigned(o1 - o0, 'won')}` : `영업일당 ${word}은 계산할 수 없음`;
+    return `조회 기간(${cur.calendarDays}일)과 비교 기간(${prev.calendarDays}일)의 길이가 달라 영업일당으로 비교했어요: ${sales}, ${profit}.`;
+  }
+  const s0 = comparableValue(prev.totalSales);
+  const s1 = comparableValue(cur.totalSales);
   const rs = s0 !== null && s1 !== null ? rel(s0, s1) : null;
   const salesDir = rs === null ? null : Math.abs(rs) < 0.03 ? 0 : rs > 0 ? 1 : -1;
   const salesText =
-    salesDir === null ? '매출 변화는 계산할 수 없고' : salesDir === 0 ? '매출은 비슷하' : `매출은 ${(Math.abs(rs!) * 100).toFixed(0)}% ${salesDir > 0 ? '늘었' : '줄었'}`;
+    salesDir === null ? '매출 변화는 계산할 수 없고' : salesDir === 0 ? '매출은 비슷하' : `매출은 ${(Math.abs(rs!) * 100).toFixed(1)}% ${salesDir > 0 ? '늘었' : '줄었'}`;
   // 비용이 덜 채워진 기간도 입력된 비용만 반영한 잠정값으로 요약하고, 미확정임을 덧붙인다
   const d0 = profitForDisplay(prev.operatingProfit);
   const d1 = profitForDisplay(cur.operatingProfit);
@@ -779,7 +855,7 @@ export function homeHeadline(prev: PeriodSummary, cur: PeriodSummary): string {
   const word = provisional ? '영업이익(미확정)' : cur.operatingProfit.estimated || prev.operatingProfit.estimated ? '예상 영업이익' : '영업이익';
   const diff = p1 - p0;
   const profitDir = Math.abs(diff) < Math.max(10000, Math.abs(p0) * 0.03) ? 0 : diff > 0 ? 1 : -1;
-  const profitText = profitDir === 0 ? `${word}도 비슷해요.` : `${word}${salesDir !== null && salesDir !== profitDir ? '이' : '도'} ${fmtMan(diff)} ${profitDir > 0 ? '늘었어요' : '줄었어요'}.`;
+  const profitText = profitDir === 0 ? `${word}도 비슷해요.` : `${word}${salesDir !== null && salesDir !== profitDir ? '이' : '도'} ${fmt(Math.abs(diff), 'won')} ${profitDir > 0 ? '늘었어요' : '줄었어요'}.`;
   if (salesDir === null) return `${salesText} ${profitText}`;
   const join = profitDir !== 0 && salesDir !== profitDir ? '지만' : '고';
   const tail = provisional ? ` 비용 ${missingCostCount(cur) + missingCostCount(prev)}개가 아직 입력되지 않아 실제보다 높게 보일 수 있어요.` : '';

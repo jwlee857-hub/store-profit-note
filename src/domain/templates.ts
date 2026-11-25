@@ -23,18 +23,6 @@ export function defaultKpisFor(target: Channel | 'common', main?: MetricRef): Pi
   return { kpi, extraKpis: DELIVERY_KPI_SET.filter((m) => !sameMetric(m, kpi)) };
 }
 
-/**
- * 새 계획의 쿠폰 금액 기본값: 가장 최근 결과 판단에서 정한 '다음 기간 쿠폰 금액'.
- * 같은 판매 방식 대상 계획을 먼저 보고, 없으면 대상과 관계없이 가장 최근 것. 없으면 null.
- */
-export function suggestedCoupon(solutions: Solution[], target: Channel | 'common'): { amount: number; from: Solution } | null {
-  const withNext = solutions
-    .filter((s) => s.review.nextCouponAmount !== null && s.review.nextCouponAmount !== undefined)
-    .sort((a, b) => (b.review.reviewedAt ?? b.createdAt).localeCompare(a.review.reviewedAt ?? a.createdAt));
-  const pick = withNext.find((s) => s.target === target) ?? withNext[0];
-  return pick ? { amount: pick.review.nextCouponAmount!, from: pick } : null;
-}
-
 /** 해결안 작성용 예시 템플릿. 검증된 처방이 아니라 작성 출발점이다. */
 export interface SolutionTemplate {
   id: string;

@@ -23,3 +23,20 @@ input[type='number']::-webkit-outer-spin-button {
   -webkit-appearance: none;
   margin: 0;
 }
+
+/* 성과 확인 '회의용 요약 인쇄': 요약 한 장만 인쇄 (화면에서는 숨김) */
+@media print {
+  body:has(.print-only) * {
+    visibility: hidden;
+  }
+  .print-only,
+  .print-only * {
+    visibility: visible;
+  }
+  .print-only {
+    display: block !important;
+    position: absolute;
+    inset: 0 0 auto 0;
+    color: #000;
+  }
+}

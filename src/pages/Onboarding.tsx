@@ -1,14 +1,14 @@
 import { useState } from 'react';
 import { Logo } from '../components/Logo';
 import { Button, Card, Checkbox, Field, NumberInput, Notice, TextInput } from '../components/ui';
-import { WEEKDAY_LABELS, addDays, todayStr } from '../domain/dates';
+import { WEEKDAY_LABELS, todayStr } from '../domain/dates';
 import { registerStoreData, type DeliveryAppInput } from '../domain/factory';
 import { CHANNEL_LABEL } from '../domain/labels';
-import { generateSample } from '../domain/sample';
+import { storySample } from '../domain/sample';
 import { CHANNELS, type Channel } from '../domain/types';
 import { useApp } from '../state/AppContext';
 import { readRecovery } from '../storage/storage';
-import { ImportButton, StorageGuide, downloadText } from './DataManagement';
+import { ImportButton, downloadText } from './DataManagement';
 
 export function Onboarding() {
   const { replaceAll, navigate, loadError } = useApp();
@@ -20,14 +20,16 @@ export function Onboarding() {
   const recovery = loadError ? readRecovery() : null;
 
   const startSample = () => {
-    replaceAll(generateSample(addDays(todayStr(), -1)), '샘플 데이터를 불러왔습니다.');
+    // 내장 샘플: 2026년 8~11월 배달 쿠폰 시험 (기준일 2026-11-23 고정)
+    replaceAll(storySample(), '샘플 데이터를 불러왔습니다.');
     navigate('dashboard');
   };
 
   const finish = (apps: DeliveryAppInput[], directDelivery: boolean) => {
     const d = registerStoreData({ name, channels: CHANNELS.filter((c) => channels.includes(c)), regularOpenDays: days, deliveryApps: apps, directDelivery });
-    replaceAll(d, '가게를 등록했습니다. 필요한 설정을 이어서 입력하세요.');
-    navigate('store');
+    // 설정 화면 대신 홈으로: 수수료율·원가율을 몰라도 오늘 매출과 주문 수부터 기록할 수 있다
+    replaceAll(d, '가게를 등록했어요. 오늘 매출부터 기록해 보세요.');
+    navigate('dashboard');
   };
 
   const register = () => {
@@ -66,23 +68,15 @@ export function Onboarding() {
       )}
 
       {mode === 'choose' ? (
-        <div className="grid gap-4 sm:grid-cols-2">
-          <Card>
-            <h2 className="text-lg font-semibold">샘플 데이터로 둘러보기</h2>
-            <p className="mt-2 text-sm text-slate-600">
-              가상의 식당 데이터로 연속된 두 개의 28일 기간을 비교합니다. 홀 매출 감소, 배달 주문 증가와 주문당 이익 악화, 포장 증가가 함께 나타나는 상황입니다.
-            </p>
-            <Button variant="primary" className="mt-4 w-full" onClick={startSample}>
-              샘플로 시작
-            </Button>
-          </Card>
-          <Card>
-            <h2 className="text-lg font-semibold">내 가게 등록하기</h2>
-            <p className="mt-2 text-sm text-slate-600">가게명과 판매 방식만 입력하면 시작할 수 있습니다. 나머지는 나중에 채워도 됩니다.</p>
-            <Button variant="primary" className="mt-4 w-full" onClick={() => setMode('register')}>
-              등록 시작
-            </Button>
-          </Card>
+        <div className="mx-auto max-w-md space-y-3">
+          <Button variant="primary" className="w-full py-3 text-base" onClick={() => setMode('register')}>
+            내 가게 시작
+          </Button>
+          <p className="text-center text-sm text-slate-600">가게 이름과 판매 방식만 정하면 바로 오늘 매출을 적을 수 있어요.</p>
+          <Button className="w-full" onClick={startSample}>
+            샘플 둘러보기
+          </Button>
+          <p className="text-center text-xs text-slate-600">가상 식당이 배달 쿠폰을 바꾸고 결과를 확인한 사례예요.</p>
         </div>
       ) : mode === 'delivery' ? (
         <DeliveryAppsStep onBack={() => setMode('register')} onDone={finish} />
@@ -124,8 +118,10 @@ export function Onboarding() {
         </Card>
       )}
 
-      <div className="mx-auto mt-8 max-w-xl space-y-3 rounded-xl bg-white p-4 ring-1 ring-slate-200">
-        <StorageGuide />
+      <div className="mx-auto mt-8 max-w-md space-y-3 rounded-xl bg-white p-4 text-center ring-1 ring-slate-200">
+        <p className="text-sm text-slate-800">
+          <b>이 기기의 이 브라우저에 저장돼요.</b> 다른 기기로 옮기는 방법은 시작한 뒤 ‘설정 › 백업·복원’에서 안내해요.
+        </p>
         <div className="flex justify-center">
           <ImportButton label="백업 파일에서 복원" />
         </div>

@@ -48,7 +48,8 @@ describe('입력 현황: 판매 방식별 묶음', () => {
     // 그룹 합계는 그날 기록의 매출 합과 같다 (같은 계산 기준, 별도 저장 없음)
     const sum = d.sales.filter((e) => e.date === D).reduce((s, e) => s + (netSales(e) ?? 0), 0);
     expect(g.hall.total! + g.delivery.total! + g.takeout.total!).toBe(sum);
-    expect(computeSummary(d, { start: D, end: D }).totalSales.value).toBe(sum);
+    // 배달앱 B가 미입력이라 총매출은 부분 합계(완전한 실적으로 비교하지 않음)
+    expect(computeSummary(d, { start: D, end: D }).totalSales).toMatchObject({ value: null, provisional: sum, salesGap: true });
   });
 
   it('매출 없음 + 입력이 섞이면 완료(합계는 입력분), 매출 없음 + 미입력은 일부 입력', () => {

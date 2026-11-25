@@ -1,8 +1,9 @@
 // 오늘 매출 간편 입력과 날짜별 입력 현황. 비용 입력은 별도 단계(상세 입력)로 분리한다.
-import { useEffect, useId, useMemo, useRef, useState } from 'react';
+import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { AmountForm } from '../domain/amountForm';
 import { netSales } from '../domain/calc';
-import { WEEKDAY_LABELS, isValidDate, todayStr, weekday } from '../domain/dates';
+import { WEEKDAY_LABELS, isValidDate, weekday } from '../domain/dates';
+import { appToday } from '../domain/periods';
 import {
   ENTRY_STATUS_LABEL,
   NEED_PROMPT,
@@ -25,7 +26,7 @@ import {
 import { FEE_NEED_TEXT, payKindOf, type PayKind } from '../domain/estimate';
 import { newSalesEntry } from '../domain/factory';
 import { fmt, josa } from '../domain/format';
-import { CHANNEL_LABEL } from '../domain/labels';
+import { CHANNEL_LABEL, DIRECT_LABEL } from '../domain/labels';
 import type { Channel, SalesEntry } from '../domain/types';
 import { findDuplicates, validateSalesEntry } from '../domain/validation';
 import { useApp, useData } from '../state/AppContext';
@@ -69,14 +70,14 @@ const monthDay = (d: string) => `${Number(d.slice(5, 7))}월 ${Number(d.slice(8,
 
 export function QuickEntry({ date, channel, routeId, onClose, onSaved, onOpenDetail }: QuickEntryProps) {
   const data = useData();
-  const { update } = useApp();
+  const { update, toast } = useApp();
   const slots = useMemo(() => salesSlots(data), [data]);
   const storeChannels = Array.from(new Set(slots.map((s) => s.channel)));
 
   const initial = useMemo<SalesEntry>(() => {
     // 지정한 경로가 없으면 그 날짜에서 아직 입력하지 않은 첫 경로로 연다 (이미 입력한 경로로 열어 중복 경고부터 보이지 않게).
     // 이전 날짜의 금액·주문 수는 복사하지 않는다.
-    const d = date ?? todayStr();
+    const d = date ?? appToday(data);
     const last = data.prefs.lastEntry;
     const firstMissing = isValidDate(d) ? dayInputStatus(data, d).slots.find((s) => s.state.kind === 'missing') : undefined;
     const pick: SalesSlot | undefined =
@@ -89,6 +90,10 @@ export function QuickEntry({ date, channel, routeId, onClose, onSaved, onOpenDet
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const [e, setE] = useState<SalesEntry>(initial);
+  // 실행 중인 계획의 주 지표가 홀 방문 고객 수·제공 식수면 그 칸을 접지 않고 처음부터 보인다
+  const runningKpis = data.solutions.filter((s) => s.status === 'running').map((s) => s.kpi.key);
+  const trackVisitors = runningKpis.includes('visitors');
+  const trackMeals = runningKpis.includes('meals');
   const [form, setForm] = useState<AmountForm>(EMPTY_FORM);
   const [touched, setTouched] = useState(false);
   const [applied, setApplied] = useState<string | null>(null);
@@ -103,6 +108,10 @@ export function QuickEntry({ date, channel, routeId, onClose, onSaved, onOpenDet
   const savingRef = useRef(false);
   const [formKey, setFormKey] = useState(0);
   const pendingRef = useRef<HTMLDivElement>(null);
+  /** 날짜·경로 고르기 펼침 ('11월 23일 · 배달앱 A  변경') */
+  const [picking, setPicking] = useState(false);
+  /** 이 경로는 주문 없음(명시적 0원). 미입력(모름)과 구분해 '주문 없음 확인'으로 저장한다 */
+  const [noOrders, setNoOrders] = useState(false);
 
   // 결제 구분 → 저장 필드. 가게에 카드·현금 결제수단이 있으면 그 결제수단으로, 없으면 카드 결제액으로 나타낸다
   const cardMethod = data.paymentMethods.find((p) => payKindOf(data, p.id) === 'card' && p.name.includes('카드'));
@@ -123,7 +132,7 @@ export function QuickEntry({ date, channel, routeId, onClose, onSaved, onOpenDet
   const blockingDup = !!dup.exact;
   const needsExtraConfirm = !dup.exact && dup.sameSlot.length > 0 && !allowExtra;
   const err = (k: string) => (touched ? fieldErrors[k] : undefined);
-  const isToday = e.date === todayStr();
+  const isToday = e.date === appToday(data);
   // 자동 계산 상태: 입력값이 바뀔 때마다 다시 계산 (저장할 때도 같은 값으로 계산)
   const auto = useMemo(() => autoCalcSummary(current, data), [data, estimateInputsKey(current)]); // eslint-disable-line react-hooks/exhaustive-deps
   // 비용 미리보기: 저장 때와 같은 계산(fillEstimates)이라 보이는 금액 = 저장되는 금액
@@ -146,12 +155,12 @@ export function QuickEntry({ date, channel, routeId, onClose, onSaved, onOpenDet
   const multi = !!day && day.slots.length > 1;
 
   // ── 판매 방식·경로 바꾸기: 입력 중인 내용이 있으면 옮길지·비울지·취소할지 묻는다 ──
-  const dirty = form.net !== null || form.discount !== null || form.refund !== null || e.orders !== null || e.visitors !== null || e.cardSales !== null || pay !== 'unknown';
+  const dirty = form.net !== null || form.discount !== null || form.refund !== null || e.orders !== null || e.visitors !== null || (e.meals ?? null) !== null || e.cardSales !== null || pay !== 'unknown';
   const slotFor = (ch: Channel, rid?: string) => slots.find((s) => s.channel === ch && (rid ? s.routeId === rid : true));
   const moveTo = (s: SalesSlot, keep: boolean) => {
     setE((x) =>
       keep
-        ? { ...x, channel: s.channel, routeId: s.routeId, visitors: s.channel === 'hall' ? x.visitors : null }
+        ? { ...x, channel: s.channel, routeId: s.routeId, visitors: s.channel === 'hall' ? x.visitors : null, meals: s.channel === 'hall' ? x.meals : null }
         : newSalesEntry({ date: x.date, channel: s.channel, routeId: s.routeId, amountMode: 'net' }),
     );
     if (!keep) {
@@ -162,6 +171,7 @@ export function QuickEntry({ date, channel, routeId, onClose, onSaved, onOpenDet
       setTouched(false);
       setFormKey((k) => k + 1);
     }
+    setNoOrders(false);
     setAllowExtra(false);
     setPending(null);
   };
@@ -178,14 +188,60 @@ export function QuickEntry({ date, channel, routeId, onClose, onSaved, onOpenDet
     savingRef.current = false;
   }, [data]);
 
+  // 다음 경로로 넘어갈 때 입력 칸을 비운다 (이전 경로의 매출·주문 수·할인·환불은 복사하지 않는다)
+  const resetTo = (slot: SalesSlot, date: string) => {
+    setE(newSalesEntry({ date, channel: slot.channel, routeId: slot.routeId, amountMode: 'net' }));
+    setForm(EMPTY_FORM);
+    setApplied(null);
+    setPay('unknown');
+    setLaterNeeds(false);
+    setTouched(false);
+    setAllowExtra(false);
+    setNoOrders(false);
+    setFormKey((k) => k + 1);
+    setTimeout(() => {
+      const dlg = Array.from(document.querySelectorAll('[role="dialog"]')).pop();
+      dlg?.querySelector('.modal-body')?.scrollTo?.({ top: 0 });
+      dlg?.querySelector<HTMLElement>('[data-autofocus]')?.focus({ preventScroll: true });
+    }, 0);
+  };
+
+  // 주문 없음: 기록(0원 매출)을 만들지 않고 그 날·경로의 '주문 없음 확인'만 남긴다 — 계산에서는 빠진 날이 아니라 확인된 0원
+  const saveNoOrders = (mode: 'close' | 'next') => {
+    if (savingRef.current || existingList.length) return;
+    savingRef.current = true;
+    const slot = { date: e.date, channel: e.channel, routeId: e.routeId };
+    const name = day?.slots[curIdx]?.label ?? routeName(e.routeId);
+    const ok = update(
+      (d) => ({
+        ...d,
+        salesChecks: [...d.salesChecks.filter((c) => !(c.date === slot.date && c.channel === slot.channel && c.routeId === slot.routeId)), { ...slot, status: 'noSales', checkedAt: new Date().toISOString() }],
+      }),
+      `${name}: 주문 없음(0원)으로 기록했어요`,
+    );
+    if (!ok) {
+      savingRef.current = false;
+      return;
+    }
+    if (mode === 'next' && nextSlot) return resetTo(nextSlot, e.date);
+    onClose();
+  };
+
+  // 나중에 기록: 매출도 '주문 없음' 확인도 저장하지 않고 입력 현황으로 돌아간다 (미입력 = 아직 모르는 값)
+  const leaveForLater = () => {
+    toast(`${day?.slots[curIdx]?.label ?? routeName(e.routeId)}: 미입력으로 남겨 두었어요`, 'info');
+    onClose();
+  };
+
   const save = (mode: 'close' | 'next') => {
+    if (noOrders) return saveNoOrders(mode);
     if (savingRef.current) return; // 중복 클릭 방지
     setTouched(true);
     if (Object.keys(fieldErrors).length || blockingDup || needsExtraConfirm || pending) return;
     savingRef.current = true;
     setSaving(true);
     // 설정한 것은 자동으로 적용: 수수료·건당 기준 비용(설정 기준 계산)·식재료비(메뉴 평균 원가율 추정)
-    const toSave: SalesEntry = { ...current, visitors: current.channel === 'hall' ? current.visitors : null };
+    const toSave: SalesEntry = { ...current, visitors: current.channel === 'hall' ? current.visitors : null, meals: current.channel === 'hall' ? (current.meals ?? null) : null };
     const filled = fillEstimates(toSave, data);
     const entry: SalesEntry = filled.entry;
     const st = entryStatus(entry, data).status;
@@ -195,6 +251,8 @@ export function QuickEntry({ date, channel, routeId, onClose, onSaved, onOpenDet
       .map((l) => `${l.label} ${fmt(l.amount, 'won')}${l.state === 'estimated' ? '(추정)' : ''}`)
       .join(' · ');
     const goNext = mode === 'next' && !!nextSlot;
+    const leftSlots = (day?.slots ?? []).filter((s) => s.state.kind === 'missing' && !(s.channel === entry.channel && s.routeId === entry.routeId)).map((s) => s.label);
+    const laterCosts = Array.from(new Set([...filled.needsInfo, ...entryStatus(entry, data).missing.map((c) => DIRECT_LABEL[c])]));
     const allDone = multi && day!.missingCount - (curWasMissing ? 1 : 0) === 0;
     const ok = update(
       (d) => ({
@@ -206,11 +264,11 @@ export function QuickEntry({ date, channel, routeId, onClose, onSaved, onOpenDet
       }),
       {
         text: '매출을 저장했습니다',
+        // 오늘 마감할 일(아직 입력할 경로)과 정산일에 할 일(나중에 보완할 비용)을 나눠 알린다
         detail: [
-          allDone ? '이 날짜의 모든 경로를 입력했어요' : null,
+          allDone ? '이 날짜의 모든 경로를 입력했어요' : leftSlots.length ? `오늘 아직 입력할 경로: ${leftSlots.join(', ')}` : null,
           costText || null,
-          filled.needsInfo.length ? `계산에 필요한 정보 없음: ${filled.needsInfo.join('·')}` : null,
-          isCostDone(st) ? null : ENTRY_STATUS_LABEL[st],
+          laterCosts.length ? `정산일에 보완할 비용: ${laterCosts.join('·')}` : null,
         ]
           .filter(Boolean)
           .join(' · '),
@@ -225,31 +283,19 @@ export function QuickEntry({ date, channel, routeId, onClose, onSaved, onOpenDet
     }
     // 성공: 화면이 새 상태로 다시 그려진 뒤에 잠금을 푼다(빠른 두 번 누름이 이전 값으로 또 저장하지 않게)
     onSaved?.(entry);
-    if (goNext) {
-      // 같은 날짜의 다음 미입력 경로로. 이전 경로의 매출·주문 수·할인·환불은 복사하지 않는다
-      setE(newSalesEntry({ date: entry.date, channel: nextSlot!.channel, routeId: nextSlot!.routeId, amountMode: 'net' }));
-      setForm(EMPTY_FORM);
-      setApplied(null);
-      setPay('unknown');
-      setLaterNeeds(false);
-      setTouched(false);
-      setAllowExtra(false);
-      setFormKey((k) => k + 1);
-      setTimeout(() => {
-        const dlg = Array.from(document.querySelectorAll('[role="dialog"]')).pop();
-        dlg?.querySelector('.modal-body')?.scrollTo?.({ top: 0 });
-        dlg?.querySelector<HTMLElement>('[data-autofocus]')?.focus({ preventScroll: true });
-      }, 0);
-      return;
-    }
+    if (goNext) return resetTo(nextSlot!, entry.date);
     onClose();
   };
 
   const existingList = [...(dup.exact ? [dup.exact] : []), ...dup.sameSlot];
   const routeName = (id: string) => data.routes.find((r) => r.id === id)?.name ?? '(삭제된 경로)';
   const payName = (id: string | null) => (id ? data.paymentMethods.find((p) => p.id === id)?.name ?? '결제수단' : '결제수단 구분 없음');
-  const hasErrors = touched && (Object.keys(fieldErrors).length > 0 || blockingDup || needsExtraConfirm);
-  const dirtySummary = [form.net !== null ? `매출 ${fmt(form.net, 'won')}` : null, e.orders !== null ? `주문 ${fmt(e.orders, 'orders')}` : null, e.visitors !== null ? `방문 ${fmt(e.visitors, 'people')}` : null, form.discount !== null || form.refund !== null ? '할인·환불 상세' : null]
+  const hasErrors = !noOrders && touched && (Object.keys(fieldErrors).length > 0 || blockingDup || needsExtraConfirm);
+  // 버튼에 목적지를 쓴다: 같은 경로 이름이 두 판매 방식에 있으면 판매 방식까지
+  const nextName = nextSlot ? (day!.slots.filter((s) => s.routeId === nextSlot.routeId).length > 1 ? nextSlot.label : routeName(nextSlot.routeId)) : '';
+  const curName = routeName(e.routeId);
+  const showPick = picking || (touched && !!(fieldErrors.date || fieldErrors.routeId) && !noOrders);
+  const dirtySummary = [form.net !== null ? `매출 ${fmt(form.net, 'won')}` : null, e.orders !== null ? `주문 ${fmt(e.orders, 'orders')}` : null, e.visitors !== null ? `방문 ${fmt(e.visitors, 'people')}` : null, (e.meals ?? null) !== null ? `식수 ${fmt(e.meals, 'meals')}` : null, form.discount !== null || form.refund !== null ? '할인·환불 상세' : null]
     .filter(Boolean)
     .join(' · ');
 
@@ -266,12 +312,12 @@ export function QuickEntry({ date, channel, routeId, onClose, onSaved, onOpenDet
           )}
           <Button onClick={onClose}>취소</Button>
           {nextSlot && (
-            <Button onClick={() => save('close')} disabled={blockingDup || saving}>
+            <Button onClick={() => save('close')} disabled={(!noOrders && blockingDup) || saving}>
               저장하고 닫기
             </Button>
           )}
-          <Button variant="primary" onClick={() => save('next')} disabled={blockingDup || saving}>
-            {nextSlot ? '저장하고 다음' : '저장하고 마치기'}
+          <Button variant="primary" onClick={() => save('next')} disabled={(!noOrders && blockingDup) || saving || (noOrders && existingList.length > 0)}>
+            {nextSlot ? `저장하고 ${nextName} 입력` : '저장하고 마치기'}
           </Button>
         </>
       }
@@ -281,7 +327,7 @@ export function QuickEntry({ date, channel, routeId, onClose, onSaved, onOpenDet
           <div className="rounded-lg bg-slate-50 px-3 py-2 ring-1 ring-slate-200" aria-label="입력 진행">
             <div className="flex flex-wrap items-baseline justify-between gap-x-2">
               <span className="text-sm font-semibold text-slate-900">
-                {e.date.slice(5).replace('-', '.')}({WEEKDAY_LABELS[weekday(e.date)]}) · 입력 경로 {day!.slots.length}개 중 {day!.enteredCount}개 완료
+                기록할 곳 {day!.slots.length}곳 중 {day!.enteredCount}곳 완료{!nextSlot ? ' · 마지막 경로' : ''}
               </span>
               {!day!.open && <span className="text-xs text-slate-600">휴업일</span>}
             </div>
@@ -293,13 +339,19 @@ export function QuickEntry({ date, channel, routeId, onClose, onSaved, onOpenDet
                 />
               ))}
             </div>
-            <p className="mt-1.5 text-sm text-slate-700">
-              지금: <b>{day!.slots[curIdx]?.label ?? routeName(e.routeId)}</b>
-              {nextSlot ? <> · 다음: {nextSlot.label}</> : <> · 마지막 경로</>}
-            </p>
           </div>
         )}
 
+        {/* 날짜·경로는 한 줄로. '변경'을 눌러야 고르는 칸이 열린다 */}
+        <details aria-label="기록할 날짜와 경로" open={showPick} onToggle={(ev) => setPicking((ev.currentTarget as HTMLDetailsElement).open)}>
+          <summary className="flex cursor-pointer list-none flex-wrap items-center justify-between gap-2">
+            <span className="text-base font-semibold text-slate-900">
+              {isValidDate(e.date) ? `${monthDay(e.date)}(${WEEKDAY_LABELS[weekday(e.date)]})` : '날짜 미정'} · {curName}
+              {slots.filter((s) => s.routeId === e.routeId).length > 1 ? ` · ${CHANNEL_LABEL[e.channel]}` : ''}
+            </span>
+            <span className="rounded-md px-2 py-1 text-sm font-medium text-slate-700 underline decoration-slate-300 underline-offset-4">{showPick ? '닫기' : '변경'}</span>
+          </summary>
+          <div className="mt-3 space-y-3">
         <div className="grid gap-3 sm:grid-cols-2">
           <Field label="날짜" required error={err('date') && !blockingDup ? err('date') : undefined} warning={v.warnings.date}>
             {(id) => <DateInput id={id} value={e.date} onChange={(x) => setE((y) => ({ ...y, date: x }))} invalid={!!err('date') && !blockingDup} />}
@@ -324,7 +376,20 @@ export function QuickEntry({ date, channel, routeId, onClose, onSaved, onOpenDet
         ) : (
           <Notice tone="warn">이 판매 방식에 연결된 주문 경로가 없습니다. 가게 설정에서 주문 경로를 추가하세요.</Notice>
         )}
+          </div>
+        </details>
         {err('routeId') && <p className="text-sm text-red-700">⛔ {err('routeId')}</p>}
+
+        <div className="flex flex-col gap-1">
+          <ToggleGroup
+            value={noOrders ? 'none' : 'amount'}
+            onChange={(v) => setNoOrders(v === 'none')}
+            options={[
+              { value: 'amount', label: '금액 입력' },
+              { value: 'none', label: '주문 없음' },
+            ]}
+          />
+        </div>
 
         {pending && (
           <div ref={pendingRef} role="alertdialog" aria-label="입력 대상 바꾸기" className="space-y-2 rounded-lg bg-amber-50 p-3 text-sm text-amber-950 ring-1 ring-amber-200">
@@ -374,13 +439,30 @@ export function QuickEntry({ date, channel, routeId, onClose, onSaved, onOpenDet
           </Notice>
         )}
 
+        {noOrders ? (
+          <Notice tone={existingList.length ? 'warn' : 'info'}>
+            {existingList.length ? (
+              <p>이 날짜·경로에는 이미 매출 기록이 있어 ‘주문 없음’으로 표시할 수 없어요. 위 기록을 수정하세요.</p>
+            ) : (
+              <>
+                <p className="font-medium">
+                  {isValidDate(e.date) ? monthDay(e.date) : ''} {curName}: 주문 없음(0원)으로 기록해요
+                </p>
+                <p className="mt-0.5 text-sm">비워 둔 ‘미입력’은 아직 모르는 값이라 합계에서 빠지지만, ‘주문 없음’은 확인한 0원으로 계산해요.</p>
+              </>
+            )}
+          </Notice>
+        ) : (<>
         <SalesAmountInput
           form={form}
           onChange={(f) => {
             setForm(f);
             if (f.net !== form.net) setApplied(null);
           }}
-          label={isToday ? '오늘 매출' : '매출 금액'}
+          label={e.channel === 'delivery' ? '할인·환불을 뺀 매출' : isToday ? '오늘 매출' : '매출 금액'}
+          delivery={e.channel === 'delivery'}
+          onLater={leaveForLater}
+          laterNote={dirtySummary ? `적어 둔 ${josa(dirtySummary, '은/는')} 저장되지 않아요.` : null}
           error={err('netInput')}
           warning={v.warnings.netInput}
           autoFocus
@@ -430,17 +512,29 @@ export function QuickEntry({ date, channel, routeId, onClose, onSaved, onOpenDet
           )}
         </Field>
         {e.channel === 'hall' && (
-          <More summary="홀 방문 고객 수 — 선택" defaultOpen={e.visitors !== null}>
-            <Field label="홀 방문 고객 수" error={err('visitors')} hint="비우면 객단가는 ‘데이터 필요’로 표시돼요">
+          <HallCount open={trackVisitors} summary="홀 방문 고객 수 — 선택" defaultOpen={e.visitors !== null}>
+            <Field label="홀 방문 고객 수" error={err('visitors')} hint={trackVisitors ? '실행 중인 계획의 주 지표예요. 비우면 그날은 비교에서 빠져요' : '비우면 객단가는 ‘데이터 필요’로 표시돼요'}>
               {(id) => (
                 <div className="max-w-xs">
                   <NumberInput id={id} value={e.visitors} onChange={(x) => setE((y) => ({ ...y, visitors: x }))} suffix="명" invalid={!!err('visitors')} />
                 </div>
               )}
             </Field>
-          </More>
+          </HallCount>
+        )}
+        {e.channel === 'hall' && (
+          <HallCount open={trackMeals} summary="제공 식수 — 선택" defaultOpen={(e.meals ?? null) !== null}>
+            <Field label="제공 식수" error={err('meals')} hint="주문 건수·방문객과 별도. 비우면 미입력(0끼와 달라요)">
+              {(id) => (
+                <div className="max-w-xs">
+                  <NumberInput id={id} value={e.meals ?? null} onChange={(x) => setE((y) => ({ ...y, meals: x }))} suffix="끼" invalid={!!err('meals')} />
+                </div>
+              )}
+            </Field>
+          </HallCount>
         )}
 
+        {(shownPreview.length > 0 || needs.length > 0) && (
         <section aria-label="자동 계산 상태" className="space-y-2 rounded-lg bg-slate-50 px-3 py-2 ring-1 ring-slate-200">
           <div className="flex flex-wrap items-start justify-between gap-x-2 gap-y-1 text-sm">
             <CostPreviewList lines={shownPreview} />
@@ -469,6 +563,8 @@ export function QuickEntry({ date, channel, routeId, onClose, onSaved, onOpenDet
           )}
           {showCalc && <AutoCalcDetail auto={auto} lines={shownPreview} />}
         </section>
+        )}
+        </>)}
       </div>
     </Modal>
   );
@@ -538,7 +634,7 @@ function slotText(state: SlotState): { text: string; tone: BadgeTone; icon: stri
     case 'entered':
       return { text: ENTRY_STATUS_LABEL[state.status], tone: STATUS_TONE[state.status], icon: STATUS_ICON[state.status] };
     case 'noSales':
-      return { text: '매출 없음 (확인함)', tone: 'gray', icon: '–' };
+      return { text: '주문 없음 (0원)', tone: 'gray', icon: '–' };
     case 'closed':
       return { text: '휴업일', tone: 'gray', icon: '◌' };
     case 'missing':
@@ -556,7 +652,7 @@ function groupText(g: ChannelGroup): { text: string; tone: BadgeTone; icon: stri
     case 'done':
       return { text: '입력 완료', tone: 'green', icon: '✓' };
     case 'noSales':
-      return { text: '매출 없음 확인', tone: 'gray', icon: '✓' };
+      return { text: '주문 없음 (0원)', tone: 'gray', icon: '✓' };
     case 'closed':
       return { text: '휴업일', tone: 'gray', icon: '◌' };
   }
@@ -573,18 +669,23 @@ export function TodayStatus({
   onEnter,
   onEdit,
   compact = false,
+  onStart,
+  startLabel,
 }: {
   date: string;
   onDateChange: (d: string) => void;
   onEnter: (slot: SalesSlot) => void;
   onEdit: (e: SalesEntry) => void;
   compact?: boolean;
+  /** 홈: 머리에 주 버튼 '오늘 매출 기록하기' */
+  onStart?: () => void;
+  startLabel?: string;
 }) {
   const data = useData();
   const { update, navigate } = useApp();
   const st = isValidDate(date) ? dayInputStatus(data, date) : null;
   const groups = st ? groupDayStatus(st) : [];
-  const isToday = date === todayStr();
+  const isToday = date === appToday(data);
   const [open, setOpen] = useState<Channel[]>([]);
   const [focusGroup, setFocusGroup] = useState<Channel | null>(null);
   const listRefs = useRef<Partial<Record<Channel, HTMLUListElement | null>>>({});
@@ -617,30 +718,33 @@ export function TodayStatus({
           ? [...d.salesChecks.filter((c) => !(c.date === date && c.channel === slot.channel && c.routeId === slot.routeId)), { date, channel: slot.channel, routeId: slot.routeId, status: 'noSales', checkedAt: new Date().toISOString() }]
           : d.salesChecks.filter((c) => !(c.date === date && c.channel === slot.channel && c.routeId === slot.routeId)),
       }),
-      on ? `${slot.label}: 매출 없음으로 확인했습니다.` : '매출 없음 표시를 취소했습니다.',
+      on ? `${slot.label}: 주문 없음(0원)으로 기록했어요` : '주문 없음 표시를 취소했어요',
     );
-  const completeGroups = groups.filter((g) => g.state === 'done' || g.state === 'noSales').length;
 
   return (
     <section aria-label="입력 현황" className="rounded-xl bg-white p-4 shadow-sm ring-1 ring-slate-200 sm:p-5">
-      <div className="mb-2 flex flex-wrap items-end justify-between gap-2">
-        <div>
+      <div className="mb-2 flex flex-wrap items-start justify-between gap-2">
+        <div className="min-w-0">
           <h2 className="text-base font-semibold text-slate-900">
-            {isToday ? '오늘' : ''} 입력 현황 · {isValidDate(date) ? `${date.slice(5).replace('-', '.')}(${WEEKDAY_LABELS[weekday(date)]})` : '날짜 선택'}
+            {isToday ? '오늘 기록' : '기록'} · {isValidDate(date) ? `${Number(date.slice(5, 7))}월 ${Number(date.slice(8, 10))}일(${WEEKDAY_LABELS[weekday(date)]})` : '날짜 선택'}
           </h2>
           {st && (
-            <p className="text-sm text-slate-600" aria-live="polite">
-              {!st.open ? '휴업일로 설정된 날입니다. ' : ''}
-              {groups.length}개 판매 방식 중 {completeGroups}개 완료
-              {st.missingCount ? ` · 남은 경로 ${st.missingCount}곳` : ''}
+            // 판매 방식과 주문 경로 개수를 섞지 않고, 기록할 곳(주문 경로) 한 기준으로 센다. 주문 없음 확인도 완료로 센다
+            <p className="text-sm text-slate-700" aria-live="polite">
+              {!st.open && !st.enteredCount ? '휴업일이에요 · 매출이 있었다면 입력하세요' : `${isToday ? '오늘' : '이 날'} 기록할 곳 ${st.slots.length}곳 중 ${st.enteredCount}곳 완료`}
             </p>
           )}
         </div>
-        <label className="flex items-center gap-2 text-sm text-slate-700">
-          날짜
-          <input type="date" className="rounded-lg border border-slate-300 px-2 py-1.5 text-base sm:text-sm" value={date} onChange={(ev) => onDateChange(ev.target.value)} />
+        <label className="flex items-center gap-1.5 text-sm text-slate-700">
+          <span className="sr-only sm:not-sr-only">날짜</span>
+          <input type="date" aria-label="기록할 날짜" className="rounded-lg border border-slate-300 px-2 py-1.5 text-base sm:text-sm" value={date} onChange={(ev) => onDateChange(ev.target.value)} />
         </label>
       </div>
+      {onStart && (
+        <Button variant="primary" className="mb-2 w-full py-3 text-base sm:w-auto sm:px-6" onClick={onStart}>
+          ＋ {startLabel ?? '오늘 매출 기록하기'}
+        </Button>
+      )}
       {st && (
         <ul className="divide-y divide-slate-100" aria-label="판매 방식별 입력 현황">
           {groups.map((g) => {
@@ -729,7 +833,7 @@ export function TodayStatus({
                                 {isCostDone(s.state.status) ? '보기·수정' : '수정'}
                               </Button>
                             ) : s.state.kind === 'noSales' ? (
-                              <Button size="sm" variant="ghost" onClick={() => markNoSales(s, false)} aria-label={`${s.label} 매출 없음 표시 취소`}>
+                              <Button size="sm" variant="ghost" onClick={() => markNoSales(s, false)} aria-label={`${s.label} 주문 없음 표시 취소`}>
                                 표시 취소
                               </Button>
                             ) : (
@@ -738,8 +842,8 @@ export function TodayStatus({
                                   입력
                                 </Button>
                                 {!compact && (
-                                  <Button size="sm" variant="ghost" onClick={() => markNoSales(s, true)} title="이 날 이 경로로 들어온 주문이 없었음을 확인" aria-label={`${s.label} 매출 없음`}>
-                                    매출 없음
+                                  <Button size="sm" variant="ghost" onClick={() => markNoSales(s, true)} title="이 날 이 경로로 들어온 주문이 없었음을 확인 (0원)" aria-label={`${s.label} 주문 없음`}>
+                                    주문 없음
                                   </Button>
                                 )}
                               </>
@@ -755,7 +859,12 @@ export function TodayStatus({
           })}
         </ul>
       )}
-      <p className="mt-2 text-xs text-slate-600">합계는 입력된 경로만 더한 값이며, 미입력은 0원으로 보지 않아요. 주문이 없었던 경로는 펼쳐서 ‘매출 없음’을 눌러 주세요.</p>
+      <p className="mt-2 text-xs text-slate-600">미입력은 0원으로 보지 않아요. 주문이 없었던 곳은 펼쳐서 ‘주문 없음’을 눌러 주세요.</p>
     </section>
   );
+}
+
+/** 홀 선택 칸: 실행 중인 계획이 보는 지표면 접지 않고 바로, 아니면 '선택' 접기 */
+function HallCount({ open, summary, defaultOpen, children }: { open: boolean; summary: string; defaultOpen: boolean; children: ReactNode }) {
+  return open ? <>{children}</> : <More summary={summary} defaultOpen={defaultOpen}>{children}</More>;
 }

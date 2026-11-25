@@ -1,6 +1,6 @@
 // 데이터 모델 정의. UI와 무관한 순수 타입만 둔다.
 
-export const SCHEMA_VERSION = 7 as const;
+export const SCHEMA_VERSION = 9 as const;
 
 export type Channel = 'hall' | 'delivery' | 'takeout';
 export const CHANNELS: Channel[] = ['hall', 'delivery', 'takeout'];
@@ -77,6 +77,15 @@ export interface StoreSettings {
   commonCostChecklist: CommonCategory[];
   /** 입력 금액 기준 안내용 (모든 입력을 같은 기준으로 맞춘다) */
   vatBasis: 'included' | 'excluded';
+  /** 요일별 영업시간 예외 (예: 토요일만 11:00~13:00). 없으면 공통 영업시간. 기록용이며 계산에는 쓰지 않는다 */
+  weekdayHours?: WeekdayHours[];
+}
+
+export interface WeekdayHours {
+  /** 0=일 ... 6=토 */
+  day: number;
+  openTime: string;
+  closeTime: string;
 }
 
 export interface DayOverride {
@@ -97,6 +106,9 @@ export interface OrderRoute {
   name: string;
   channels: Channel[];
   platformId: string | null;
+  /** 사용 시작일·종료일 (포함). 없으면 제한 없음 — 이전 데이터는 항상 사용 중으로 본다. 그 날짜에 사용한 경로만 미입력 검사에 넣는다 */
+  activeFrom?: DateStr | null;
+  activeTo?: DateStr | null;
 }
 
 /** 결제수단: 대금을 치른 수단 (예: 카드, 현금) — 주문 경로와 별개 */
@@ -200,6 +212,8 @@ export interface SalesEntry {
   orders: number | null;
   /** 홀만 사용 */
   visitors: number | null;
+  /** 제공 식수(끼). 홀만, 선택. 주문 수·방문객 수와 별개. null·없음 = 미입력(0끼와 다름) */
+  meals?: number | null;
   amountMode: AmountMode;
   /** gross 모드: 할인·환불 반영 전 상품 판매액. net 모드에서는 쓰지 않는다(null) */
   gross: number | null;
@@ -230,6 +244,17 @@ export interface PeriodCost {
   amount: number;
   source: ValueSource;
   memo: string;
+  /**
+   * 배달앱 정산서의 기간 합계(수수료)일 때 그 배달앱(주문 경로). 이 범위의 일별 계산·추정 수수료는 이 금액으로 대체된다.
+   * 이전 데이터에는 없다(일반 기간 비용).
+   */
+  routeId?: string;
+  /**
+   * 배달앱 정산서 기간 합계의 저장 방식 — v9.
+   * - total: amount가 정산서 총액 (일별 실제 수수료는 그 안의 내역)
+   * - unverified: 이전 버전 기록인데 총액인지 잔여액인지 판별할 근거가 부족함 → 원본 보존, 이전 방식(amount + 일별 실제액)으로 계산하고 확인 안내
+   */
+  settlementBasis?: 'total' | 'unverified';
 }
 
 export interface CustomerMetric {
@@ -266,6 +291,8 @@ export type MetricKey =
   | 'netSales'
   | 'orders'
   | 'visitors'
+  /** 제공 식수(끼). 홀 마감에 입력한 날만 합산 */
+  | 'meals'
   | 'avgTicket'
   | 'directProfit'
   | 'directCostPerOrder'
@@ -291,11 +318,14 @@ export interface Problem {
   targetValue: number | null;
   memo: string;
   createdAt: string;
+  /** 적용 요일 (0=일 ... 6=토). 없거나 비면 전체 기간 */
+  weekdays?: number[] | null;
 }
 
 export type SolutionStatus = 'planned' | 'running' | 'reviewPending' | 'done' | 'stopped';
 export type SolutionDirection = 'revenue' | 'cost' | 'mixed';
-export type Decision = 'keep' | 'revise' | 'stop';
+/** hold = 판단 보류(명시적으로 고른 경우만). 이전에 저장된 미선택(null)은 그대로 둔다 */
+export type Decision = 'keep' | 'revise' | 'stop' | 'hold';
 /**
  * 목표 기준
  * - total: 실행 후 기간 값 자체
@@ -318,10 +348,16 @@ export interface SolutionReview {
 
 /** 쿠폰·할인 조건 (선택) — v6. 모르면 null */
 export interface CouponTerms {
-  /** 쿠폰 1장 금액(원) */
+  /** 쿠폰 1장 금액(원). null = 미정, 0 = 쿠폰 중단 */
   amount: number | null;
   /** 최소 주문금액(원) */
   minOrder: number | null;
+  /** 대상 배달앱(주문 경로). null = 배달 전체 — v8 */
+  routeId: string | null;
+  /** 시험 전에 쓰던 쿠폰 금액(원). null = 모름 — v8 */
+  previousAmount: number | null;
+  /** 실행 기간 쿠폰 사용 건수. 사장님이 실제로 아는 경우에만 — v8 */
+  usedCount: number | null;
 }
 
 export interface Solution {
@@ -356,6 +392,10 @@ export interface Solution {
   templateId: string | null;
   review: SolutionReview;
   createdAt: string;
+  /** '이 조건으로 재시험'으로 만든 계획이면 원래 계획 id (없으면 null·없음) */
+  retestOf?: string | null;
+  /** 적용 요일 (0=일 ... 6=토). 없거나 비면 전체 기간 비교. 있으면 실행 전후의 같은 요일끼리 비교 */
+  weekdays?: number[] | null;
 }
 
 export interface AppData {
@@ -381,6 +421,8 @@ export interface AppData {
   foodCostRates: FoodCostRate[];
   prefs: AppPrefs;
   updatedAt: string;
+  /** 앱 내장 샘플의 '오늘'(고정 기준일). 실제 가게·이전 샘플에는 없다 → 실제 오늘 날짜 */
+  sampleToday?: DateStr;
 }
 
 /** 비용을 주문 1건당 금액으로 추정할 수 있는 항목 */
@@ -432,6 +474,13 @@ export interface Calc {
   provisional?: number | null;
   /** 선택 입력 항목이 일부 날짜에만 있을 때: 값이 있는 날만으로 계산했음을 표시 (예: 23일 중 22일 기준) */
   basis?: CalcBasis;
+  /**
+   * 매출·할인 기록이 일부 빠져 provisional이 부분 합계일 뿐인 경우.
+   * 비용 미입력(잠정값)과 달리 이 값으로 증감·판정을 하지 않는다 (comparableValue 참고)
+   */
+  salesGap?: boolean;
+  /** value가 없을 때 '데이터 필요' 대신 보여줄 짧은 문구 (예: 할인액 미입력) 또는 부분 합계의 이름 (예: 확인된 할인 합계) */
+  note?: string;
 }
 
 export interface CalcBasis {

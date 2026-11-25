@@ -3,7 +3,7 @@ import type { Calc } from './types';
 const nf = new Intl.NumberFormat('ko-KR', { maximumFractionDigits: 0 });
 const nf1 = new Intl.NumberFormat('ko-KR', { maximumFractionDigits: 1, minimumFractionDigits: 1 });
 
-export type Unit = 'won' | 'people' | 'orders' | 'pct' | 'days' | 'count';
+export type Unit = 'won' | 'people' | 'orders' | 'pct' | 'days' | 'count' | 'meals';
 
 export const UNIT_SUFFIX: Record<Unit, string> = {
   won: '원',
@@ -12,6 +12,7 @@ export const UNIT_SUFFIX: Record<Unit, string> = {
   pct: '%',
   days: '일',
   count: '개',
+  meals: '끼',
 };
 
 export function fmtNumber(n: number): string {
@@ -90,12 +91,35 @@ export function josa(word: string, pair: '이/가' | '은/는' | '을/를' | '�
   return word + (has ? withBatchim : without);
 }
 
-/** 쿠폰 조건 한 줄: "쿠폰 3,000원 · 최소 주문 15,000원". 아무것도 없으면 null */
-export function couponText(c: { amount: number | null; minOrder: number | null } | null | undefined): string | null {
-  if (!c || (c.amount === null && c.minOrder === null)) return null;
-  const parts = [c.amount === null ? '쿠폰 금액 미정' : c.amount === 0 ? '쿠폰 없음' : `쿠폰 ${fmt(c.amount, 'won')}`];
+/**
+ * 쿠폰 조건 한 줄: "배달앱 A · 쿠폰 1,000원 → 3,000원 · 최소 주문 15,000원". 아무것도 없으면 null.
+ * 금액 null = 미정, 0 = 쿠폰 중단(0원)
+ */
+export function couponText(c: { amount: number | null; minOrder: number | null; previousAmount?: number | null } | null | undefined, routeName?: string | null): string | null {
+  if (!c || (c.amount === null && c.minOrder === null && (c.previousAmount ?? null) === null)) return null;
+  const amt = (n: number | null) => (n === null ? '미정' : n === 0 ? '0원(중단)' : fmt(n, 'won'));
+  const parts = routeName ? [routeName] : [];
+  parts.push(c.previousAmount !== null && c.previousAmount !== undefined ? `쿠폰 ${amt(c.previousAmount)} → ${amt(c.amount)}` : c.amount === null ? '쿠폰 금액 미정' : c.amount === 0 ? '쿠폰 0원(중단)' : `쿠폰 ${fmt(c.amount, 'won')}`);
   if (c.minOrder !== null) parts.push(`최소 주문 ${fmt(c.minOrder, 'won')}`);
   return parts.join(' · ');
+}
+
+/** 쿠폰 조건이 있는 계획인가: 쿠폰 금액·기존 금액·최소 주문 중 하나라도 적었으면 (0원 = 쿠폰 중단도 유효한 조건) */
+export const hasCoupon = (c: { amount: number | null; minOrder: number | null; previousAmount?: number | null }) => c.amount !== null || c.minOrder !== null || (c.previousAmount ?? null) !== null;
+
+/** 적용 요일 이름: [6] → '토요일', [0, 6] → '일·토요일'. 없으면 null(전체 기간) */
+export function weekdaysText(ws: readonly number[] | null | undefined): string | null {
+  if (!ws?.length) return null;
+  return `${[...ws].sort((a, b) => a - b).map((d) => '일월화수목금토'[d]).join('·')}요일`;
+}
+
+/** 증감률 문구: 20% 감소 · 약 1.3% 감소 (소수 첫째 자리에서 반올림한 값이 정수가 아니면 '약') */
+export function pctChangeText(prev: number, cur: number): string | null {
+  if (prev <= 0) return null;
+  const p = ((cur - prev) / prev) * 100;
+  const r = Math.round(Math.abs(p) * 10) / 10;
+  if (r === 0) return '변화 없음';
+  return `${Math.abs(Math.abs(p) - Math.round(Math.abs(p))) < 1e-9 ? '' : '약 '}${r.toLocaleString('ko-KR')}% ${p > 0 ? '증가' : '감소'}`;
 }
 
 /** %p 차이 표기 (비율 지표 비교용) */

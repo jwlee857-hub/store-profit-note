@@ -8,7 +8,7 @@ import { computeHelper, restoredGross, type AmountForm } from '../domain/amountF
 import { fmt } from '../domain/format';
 import { Button, Field, NumberInput } from './ui';
 
-export const AMOUNT_HINT = '가게 부담 할인·환불 반영 후, 수수료·배달비 차감 전 매출입니다.';
+export const AMOUNT_HINT = '매출 기준: 가게 부담 할인·환불 반영 후, 수수료 차감 전 금액이에요(배달비도 빼기 전).';
 
 export type FocusField = 'discount' | 'refund' | 'gross' | 'card';
 
@@ -31,7 +31,16 @@ export function SalesAmountInput({
   onApplied,
   focusRequest,
   extra,
+  delivery = false,
+  onLater,
+  laterNote,
 }: {
+  /** 정산 입금액만 알 때 '나중에 기록': 이 경로를 미입력으로 두고 닫는다 (간편 입력에서만) */
+  onLater?: () => void;
+  /** 나중에 기록하면 저장되지 않는 값 안내 (예: '적어 둔 주문 3건은 저장되지 않아요') */
+  laterNote?: string | null;
+  /** 배달 매출: '할인·환불을 뺀 매출' · 수수료와 배달비 빼기 전 · 정산 입금액 안내 */
+  delivery?: boolean;
   form: AmountForm;
   onChange: (f: AmountForm) => void;
   label: string;
@@ -54,6 +63,7 @@ export function SalesAmountInput({
   /** 마지막으로 적용한 계산 (판매액과 그때 넣은 매출). 상세가 바뀌어 결과가 달라지면 다시 적용을 권한다 */
   const [appliedFrom, setAppliedFrom] = useState<{ gross: number; net: number } | null>(null);
   const [pendingFocus, setPendingFocus] = useState<FocusField | null>(null);
+  const [payoutHelp, setPayoutHelp] = useState(false);
   const areaRef = useRef<HTMLDivElement>(null);
   const calcBtnRef = useRef<HTMLButtonElement>(null);
   const wasCalcOpen = useRef(false);
@@ -114,7 +124,13 @@ export function SalesAmountInput({
 
   return (
     <div className="space-y-2" ref={areaRef}>
-      <Field label={label} required error={error} warning={warning} hint={`${AMOUNT_HINT} 배달앱 정산 입금액과는 다를 수 있어요.`}>
+      <Field
+        label={calcOpen ? `${label} (아래 판매액으로 계산 중)` : label}
+        required
+        error={error}
+        warning={warning}
+        hint={delivery ? '수수료와 배달비를 빼기 전 금액이에요' : `${AMOUNT_HINT} 배달앱 정산 입금액과는 다를 수 있어요.`}
+      >
         {(id) => (
           <NumberInput
             id={id}
@@ -129,6 +145,29 @@ export function SalesAmountInput({
           />
         )}
       </Field>
+
+      {delivery && (
+        <div>
+          <button type="button" className="text-sm font-medium text-slate-700 underline decoration-slate-300 underline-offset-4 hover:text-slate-900" aria-expanded={payoutHelp} onClick={() => setPayoutHelp((x) => !x)}>
+            정산 입금액만 알고 있어요
+          </button>
+          {payoutHelp && (
+            <div className="mt-1 rounded-md bg-slate-50 px-3 py-2 text-sm text-slate-800 ring-1 ring-slate-200" role="note">
+              <p>입금액에는 수수료와 배달비가 이미 빠져 있어요. 지금은 이 경로를 미입력으로 두고, 주문 내역에서 매출을 확인한 뒤 기록하세요.</p>
+              <p className="mt-1 text-slate-700">넣을 매출 = 주문 금액 − 가게 부담 할인 (배달앱 주문 내역에서 확인)</p>
+              {onLater && (
+                <div className="mt-2 border-t border-slate-200 pt-2">
+                  {laterNote && <p className="mb-1.5 text-amber-900">{laterNote}</p>}
+                  <Button size="sm" onClick={onLater}>
+                    나중에 기록
+                  </Button>
+                  <p className="mt-1 text-xs text-slate-600">이 경로는 미입력(아직 모름)으로 남아요.</p>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
 
       <details className="group" open={open} onToggle={(e) => setOpen((e.currentTarget as HTMLDetailsElement).open)}>
         <summary className="inline-flex cursor-pointer list-none items-center gap-1 rounded text-sm font-medium text-slate-700 underline decoration-slate-300 underline-offset-4 hover:text-slate-900">

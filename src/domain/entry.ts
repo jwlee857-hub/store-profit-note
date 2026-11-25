@@ -1,5 +1,5 @@
 // 매출 기록의 데이터 상태, 금액 기준 전환, 날짜별 입력 현황. UI와 무관한 순수 함수.
-import { applicableCategories, coveredByPeriodCost, effectiveCost, grossSales, isOpenDay, netSales, requiredCategories, routeHasPlatform, type SalesAmounts } from './calc';
+import { applicableCategories, coveredByPeriodCost, effectiveCost, grossSales, isOpenDay, netSales, requiredCategories, routeHasPlatform, salesSlots, countsUnderSettlement, settlementFor, type SalesAmounts } from './calc';
 import { costBasisOf, costDetailText, costKindOf } from './costBasis';
 import { averageMenuCostRate, calcFees, estimateFood, feeRuleFor, foodBaseLabel, foodEstimateBase, payKindOf, pickEffective, type FeeCalc, type FeeNeed } from './estimate';
 import { isValidDate } from './dates';
@@ -67,8 +67,11 @@ export function entryStatus(e: SalesEntry, data: Pick<AppData, 'routes' | 'perio
   const calculated: DirectCategory[] = [];
   let anyEntered = false;
   let knownCost = 0;
+  const settled = settlementFor(data.periodCosts, e);
   for (const c of DIRECT_CATEGORIES) {
     if (c === 'payment' && e.bundledFee) continue;
+    // 정산서 기간 합계가 대신하는 수수료 (computeSummary와 같은 규칙)
+    if (settled && (c === 'brokerage' || c === 'payment') && !countsUnderSettlement(settled, e.costs[c])) continue;
     const ec = effectiveCost(e.costs[c]);
     if (ec.status !== 'missing') {
       anyEntered = true;
@@ -485,25 +488,24 @@ export function recalcAuto(e: SalesEntry, data: EstimateData): { entry: SalesEnt
 
 // ───────── 날짜별 입력 현황 ─────────
 
-export interface SalesSlot {
-  channel: Channel;
-  routeId: string;
-  label: string;
+// 성과 비교의 입력 현황(channelCoverage)과 같은 경로 목록을 쓴다
+export { salesSlots, type SalesSlot } from './calc';
+import type { SalesSlot } from './calc';
+
+/** 마감 미입력 날을 '매출 없음'으로 확인: 그날 사용 중인 경로 중 기록이 없는 곳을 모두 매출 없음(0원 확인)으로 */
+export function markDayNoSales(d: AppData, date: DateStr): AppData {
+  const checkedAt = new Date().toISOString();
+  const add = salesSlots(d, date)
+    .filter((s) => !d.sales.some((e) => e.date === date && e.channel === s.channel && e.routeId === s.routeId))
+    .filter((s) => !d.salesChecks.some((c) => c.date === date && c.channel === s.channel && c.routeId === s.routeId))
+    .map((s) => ({ date, channel: s.channel, routeId: s.routeId, status: 'noSales' as const, checkedAt }));
+  return { ...d, salesChecks: [...d.salesChecks, ...add] };
 }
 
-/** 가게가 운영하는 채널 × 그 채널에 연결된 주문 경로 */
-export function salesSlots(data: Pick<AppData, 'store' | 'routes'>): SalesSlot[] {
-  const chans = data.store?.channels ?? [];
-  const out: SalesSlot[] = [];
-  for (const ch of chans) {
-    const routes = data.routes.filter((r) => r.channels.includes(ch));
-    // 경로 이름만으로는 판매 방식을 알 수 없는 경우가 많아(예: 전화 주문 = 포장) 항상 판매 방식을 붙인다
-    for (const r of routes) out.push({ channel: ch, routeId: r.id, label: `${r.name} · ${CHANNEL_NAME[ch]}` });
-  }
-  return out;
+/** 마감 미입력 날을 임시 휴업으로 (그날의 기존 영업·휴업 설정은 바꿔 넣는다) */
+export function markDayClosed(d: AppData, date: DateStr, note = '임시 휴업'): AppData {
+  return { ...d, dayOverrides: [...d.dayOverrides.filter((o) => o.date !== date), { date, open: false, note }] };
 }
-
-const CHANNEL_NAME: Record<Channel, string> = { hall: '홀', delivery: '배달', takeout: '포장' };
 
 export type SlotState =
   | { kind: 'entered'; status: EntryStatus; entries: SalesEntry[]; net: number | null }
@@ -525,7 +527,7 @@ export interface DayStatus {
  */
 export function dayInputStatus(data: Pick<AppData, 'store' | 'routes' | 'sales' | 'salesChecks' | 'dayOverrides' | 'periodCosts'>, date: DateStr): DayStatus {
   const open = isOpenDay(data, date);
-  const slots = salesSlots(data).map((s) => {
+  const slots = salesSlots(data, date).map((s) => {
     const entries = data.sales.filter((e) => e.date === date && e.channel === s.channel && e.routeId === s.routeId);
     let state: SlotState;
     if (entries.length) {

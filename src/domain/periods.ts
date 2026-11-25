@@ -1,6 +1,11 @@
 // 화면 공통 기준일·기본 기간 계산. 대시보드·진단·매출 목록·성과 확인·샘플 생성이 모두 이 함수를 쓴다.
-import { addDays, daysInclusive, formatDateStr, isValidRange, parseDate, previousRange, todayStr, weekday } from './dates';
+import { addDays, daysInclusive, formatDateStr, isValidRange, krDate, krRange, parseDate, previousRange, todayStr, weekday } from './dates';
 import type { AppData, DateRange, DateStr, KpiTargetMode, MetricKey, SolutionStatus } from './types';
+
+/** 화면의 '오늘': 내장 샘플은 고정 기준일, 실제 가게는 오늘 날짜 */
+export function appToday(data: Pick<AppData, 'sampleToday'> | null | undefined): DateStr {
+  return data?.sampleToday ?? todayStr();
+}
 
 /** 기준일 = 가장 최근 매출 입력일. 입력이 없으면 오늘 */
 export function referenceDate(data: Pick<AppData, 'sales'>): DateStr {
@@ -28,6 +33,25 @@ export function expandRangeToInclude(range: DateRange, date: DateStr): DateRange
 // ───────── 홈 기간 버튼 ─────────
 
 export type PeriodPreset = 'week' | 'month' | 'recent28';
+
+/**
+ * 기간을 사장님 말로: 홈 기간 선택과 같은 기간이면 '이번 달' / '지난달 같은 날짜까지보다', 아니면 날짜로.
+ * 홈과 장사 점검이 같은 기간을 같은 말로 부르게 한다.
+ */
+export function periodWords(today: DateStr, ref: DateStr, cur: DateRange, prev: DateRange): { name: string; than: string; compare: string } {
+  const same = (a: DateRange, b: DateRange) => a.start === b.start && a.end === b.end;
+  const WORDS: [PeriodPreset, string, string, string][] = [
+    ['month', '이번 달', '지난달 같은 날짜까지보다', '지난달 같은 날짜까지와 비교'],
+    ['week', '이번 주', '지난주 같은 요일까지보다', '지난주 같은 요일까지와 비교'],
+    ['recent28', '최근 4주', '직전 4주보다', '직전 4주와 비교'],
+  ];
+  for (const [k, name, than, compare] of WORDS) {
+    const r = presetRanges(k, today, ref);
+    if (same(r.cur, cur) && same(r.prev, prev)) return { name, than, compare };
+  }
+  const dot = (d: DateStr) => `${Number(d.slice(5, 7))}.${Number(d.slice(8, 10))}`;
+  return { name: `${dot(cur.start)}~${dot(cur.end)}`, than: `${dot(prev.start)}~${dot(prev.end)}보다`, compare: `${dot(prev.start)}~${dot(prev.end)}와 비교` };
+}
 
 export interface PresetRanges {
   cur: DateRange;
@@ -107,7 +131,7 @@ export function presetRanges(kind: PeriodPreset, today: DateStr, ref: DateStr): 
 // ───────── 해결안 목표 ─────────
 
 /** 영업일당 목표를 쓸 수 있는 합계형 지표 (비율·평균 지표는 영업일로 나누는 의미가 없음) */
-const ADDITIVE: MetricKey[] = ['totalSales', 'netSales', 'orders', 'visitors', 'directProfit', 'operatingProfit', 'storeDiscount'];
+const ADDITIVE: MetricKey[] = ['totalSales', 'netSales', 'orders', 'visitors', 'meals', 'directProfit', 'operatingProfit', 'storeDiscount'];
 
 export function kpiModeAllowed(key: MetricKey, unit: string, mode: KpiTargetMode): boolean {
   if (mode === 'perBusinessDay') return ADDITIVE.includes(key);
@@ -241,4 +265,13 @@ export function kpiTargetWarning(
   }
   const better = higherIsBetter ? target > base : target < base;
   return better ? null : 'notBetter';
+}
+
+/** 비교 기간 검사: 날짜가 올바르고, 실행 전이 실행 후보다 먼저 끝나야 한다 */
+export function rangeProblem(before: DateRange, after: DateRange, actualEnd?: DateStr | null): string | null {
+  if (!isValidRange(before) || !isValidRange(after)) return '날짜를 올바르게 입력하세요. 시작일이 종료일보다 늦거나 비어 있어요.';
+  if (before.start > after.end) return `실행 전 기간(${krRange(before)})이 실행 후 기간(${krRange(after)})보다 늦어요. 순서를 바꿔 지정하세요.`;
+  if (before.end >= after.start) return `실행 전 기간(${krRange(before)})과 실행 후 기간(${krRange(after)})이 겹쳐요. 실행 전은 ${krDate(addDays(after.start, -1))}까지로 지정하세요.`;
+  if (actualEnd && after.end > actualEnd) return `실행 후 기간(${krRange(after)})이 실제 종료일(${krDate(actualEnd)})을 넘어요. 실행 후 기간을 ${krDate(actualEnd)}까지로 지정하세요.`;
+  return null;
 }

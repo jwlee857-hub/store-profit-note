@@ -2,7 +2,9 @@
 import { formatRange } from './dates';
 import { diagnose, groupFindings, impactText, relatedText, type Finding } from './diagnosis';
 import { newSolution } from './factory';
-import { defaultKpisFor, kpiForFinding, suggestedCoupon, templateForFinding } from './templates';
+import { hasCoupon } from './format';
+import { addDays, nextMonday } from './dates';
+import { defaultKpisFor, kpiForFinding, templateForFinding } from './templates';
 import type { AppData, Problem, Solution } from './types';
 
 export function solutionDraft(data: AppData, problem: Problem | null, findingId?: string | null): Solution {
@@ -21,25 +23,24 @@ export function solutionDraft(data: AppData, problem: Problem | null, findingId?
   }
   if (!finding) {
     const target = problem.channel === 'all' ? 'common' : problem.channel;
-    const coupon = suggestedCoupon(data.solutions, target);
+    // 쿠폰 조건은 빈 값으로 시작한다 (다른 계획의 다음 쿠폰 금액은 '이 조건으로 재시험'에서만 넘긴다)
     return newSolution({
       problemId: problem.id,
       target,
       ...(target === 'delivery' ? defaultKpisFor(target) : {}),
-      coupon: { amount: coupon?.amount ?? null, minOrder: null },
+      weekdays: problem.weekdays ?? null,
       evidence: `문제 진단 "${problem.name}" (${periods})`,
     });
   }
   const tpl = templateForFinding(finding.id);
   const target = finding.channel === 'all' ? 'common' : finding.channel;
   const kpis = defaultKpisFor(target, kpiForFinding(finding.id, finding.channel));
-  const coupon = suggestedCoupon(data.solutions, target);
   return newSolution({
     problemId: problem.id,
     name: tpl ? tpl.name : `${finding.title} 확인·개선`,
     target,
     ...kpis,
-    coupon: { amount: coupon?.amount ?? null, minOrder: null },
+    weekdays: problem.weekdays ?? null,
     direction: tpl?.direction ?? 'mixed',
     // 가설은 진단 화면 문구 그대로 — 원인으로 확정된 것이 아님
     hypothesis: finding.hypotheses.join(' '),
@@ -50,5 +51,38 @@ export function solutionDraft(data: AppData, problem: Problem | null, findingId?
     successCriteria: tpl?.successCriteria ?? '',
     stopCriteria: tpl?.stopCriteria ?? '',
     templateId: tpl?.id ?? null,
+  });
+}
+
+/**
+ * '이 조건으로 2주 재시험': 같은 실험을 이어갈 때만 조건을 넘긴다. 저장 전에 고칠 수 있는 초안이다.
+ * - 대상 배달앱·최소 주문액·핵심 지표는 그대로, 시험 쿠폰액 = 결과 판단의 다음 쿠폰 금액(null = 미정, 0 = 쿠폰 중단), 기존 쿠폰액 = 이번 시험 쿠폰액
+ * - 실행 기간은 다음 주 월요일부터 2주. 결과 판단·쿠폰 사용 건수·목표값은 새로 정한다
+ */
+export function retestDraft(prev: Solution, today: string): Solution {
+  const start = nextMonday(today);
+  const next = prev.review.nextCouponAmount;
+  // 쿠폰 조건이 없는 계획(예: 홀 영업시간)은 쿠폰 문구·금액을 넘기지 않는다
+  const coupon = hasCoupon(prev.coupon);
+  return newSolution({
+    problemId: prev.problemId,
+    name: `${prev.name} — ${!coupon ? '' : next === null ? '쿠폰 미정 ' : next === 0 ? '쿠폰 중단 ' : `쿠폰 ${next.toLocaleString('ko-KR')}원 `}2주 재시험`,
+    target: prev.target,
+    direction: prev.direction,
+    hypothesis: prev.hypothesis,
+    evidence: `‘${prev.name}’ 결과 판단에서 이어서 시험${prev.review.judgment ? ` — ${prev.review.judgment}` : ''}`,
+    actions: prev.actions,
+    owner: prev.owner,
+    start,
+    end: addDays(start, 13),
+    kpi: prev.kpi,
+    extraKpis: prev.extraKpis,
+    kpiTargetMode: prev.kpiTargetMode,
+    coupon: coupon ? { routeId: prev.coupon.routeId, previousAmount: prev.coupon.amount, amount: next, minOrder: prev.coupon.minOrder, usedCount: null } : { ...prev.coupon, usedCount: null },
+    weekdays: prev.weekdays ?? null,
+    successCriteria: prev.successCriteria,
+    stopCriteria: prev.stopCriteria,
+    templateId: prev.templateId,
+    retestOf: prev.id,
   });
 }

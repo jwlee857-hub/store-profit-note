@@ -9,6 +9,7 @@ import type {
   FeeBase,
   MetricKey,
   ProblemType,
+  Solution,
   SolutionDirection,
   SolutionStatus,
 } from './types';
@@ -93,6 +94,7 @@ export const DECISION_LABEL: Record<Decision, string> = {
   keep: '유지·확대',
   revise: '수정 후 재시험',
   stop: '중단',
+  hold: '판단 보류',
 };
 
 export interface MetricMeta {
@@ -113,6 +115,7 @@ export const METRIC_META: Record<MetricKey, MetricMeta> = {
   netSales: { label: '판매 방식 순매출', unit: 'won', channelScoped: true, allowAll: false, higherIsBetter: true },
   orders: { label: '완료 주문 수', unit: 'orders', channelScoped: true, allowAll: true, higherIsBetter: true },
   visitors: { label: '홀 방문 고객 수', unit: 'people', channelScoped: true, allowAll: false, higherIsBetter: true },
+  meals: { label: '제공 식수', unit: 'meals', channelScoped: true, allowAll: false, higherIsBetter: true },
   avgTicket: { label: '객단가·평균 주문금액', unit: 'won', channelScoped: true, allowAll: false, higherIsBetter: true },
   directProfit: { label: '판매 방식 비용을 뺀 금액', unit: 'won', channelScoped: true, allowAll: true, higherIsBetter: true },
   directCostPerOrder: { label: '주문당 판매 방식 비용', unit: 'won', channelScoped: true, allowAll: false, higherIsBetter: false },
@@ -123,6 +126,7 @@ export const METRIC_META: Record<MetricKey, MetricMeta> = {
 export function metricLabel(key: MetricKey, channel: Channel | 'all'): string {
   const m = METRIC_META[key];
   if (key === 'avgTicket' && channel === 'hall') return '홀 객단가';
+  if (key === 'visitors') return m.label; // 이미 '홀' 포함
   if (key === 'avgTicket' && channel !== 'all') return `${CHANNEL_LABEL[channel]} 평균 주문금액`;
   if (!m.channelScoped || channel === 'all') return channel === 'all' && m.channelScoped ? `전체 ${m.label}` : m.label;
   return `${CHANNEL_LABEL[channel]} ${m.label}`;
@@ -164,4 +168,10 @@ export function metricLabelEasy(key: MetricKey, channel: Channel | 'all'): strin
   const easy = easyMetricName(key, channel);
   const exact = metricLabel(key, channel);
   return easy ? `${easy} (${exact})` : exact;
+}
+
+/** 계획에서 성과 화면으로 가는 버튼 이름: 결과 판단을 저장했으면 '10월 실행 결과 보기' */
+export function resultLabel(s: Solution): string {
+  const a = s.review.after;
+  return s.review.reviewedAt && a && a.start.slice(0, 7) === a.end.slice(0, 7) ? `${Number(a.start.slice(5, 7))}월 실행 결과 보기` : s.review.reviewedAt ? '실행 결과 보기' : '성과 확인';
 }

@@ -32,14 +32,13 @@ describe('달 이동', () => {
 });
 
 describe('그 달의 기간별 비용', () => {
-  it('샘플 11월: 9줄, 합계 1,511만 원, 지난달보다 +5만 원, 공과금만 바뀜(65만 → 70만 원)', () => {
+  it('샘플 11월: 9줄, 합계 1,506만 원, 지난달과 같음 — 공과금은 고지서 전이라 지난달 실제 금액(65만 원)으로 추정', () => {
     const mc = monthCosts(sample().periodCosts, '2026-11');
     expect(mc.rows).toHaveLength(9);
-    expect(mc.total).toBe(15_110_000);
+    expect(mc.total).toBe(15_060_000);
     expect(mc.prevTotal).toBe(15_060_000);
-    const changed = mc.rows.filter(rowChanged);
-    expect(changed.map((r) => r.label)).toEqual(['공과금']);
-    expect(changed[0]).toMatchObject({ amount: 700_000, prevAmount: 650_000, estimated: true });
+    expect(mc.rows.filter(rowChanged)).toEqual([]);
+    expect(mc.rows.find((r) => r.label === '공과금')).toMatchObject({ amount: 650_000, prevAmount: 650_000, estimated: true });
     expect(mc.rows.find((r) => r.attribution === 'delivery')!.label).toBe('광고비 · 배달 전용');
     expect(mc.rows.every((r) => !r.spansMonths)).toBe(true);
   });
@@ -75,16 +74,16 @@ describe('지난달 비용 그대로 가져오기', () => {
     expect(items).toHaveLength(9);
     expect(items.every((x) => x.start === '2026-12-01' && x.end === '2026-12-31' && x.source === 'estimated')).toBe(true);
     expect(items.find((x) => x.category === 'rent')!.amount).toBe(2_500_000);
-    expect(items.find((x) => x.category === 'utilities')!.memo).toBe('지난달에서 복사 · 고지서 도착 전 추정');
+    expect(items.find((x) => x.category === 'utilities')!.memo).toBe('지난달에서 복사 · 고지서 도착 전 · 지난달까지 실제 금액(650,000원)으로 추정');
     d.periodCosts.push(...items);
     const dec = monthCosts(d.periodCosts, '2026-12');
-    expect(dec.total).toBe(15_110_000);
+    expect(dec.total).toBe(15_060_000);
     expect(dec.rows.every((r) => r.estimated)).toBe(true);
     // 복사한 비용은 기존 계산(날짜 수만큼 나눔)에 그대로 반영된다
     expect(computeSummary(d, { start: '2026-12-01', end: '2026-12-31' }).commonCost.estimated).toBeGreaterThan(0);
     // 다시 복사해도 메모가 겹치지 않는다
     const again = copyFromPrevMonth(d.periodCosts, '2027-01', () => 'z');
-    expect(again.find((x) => x.category === 'utilities')!.memo).toBe('지난달에서 복사 · 고지서 도착 전 추정');
+    expect(again.find((x) => x.category === 'utilities')!.memo).toBe('지난달에서 복사 · 고지서 도착 전 · 지난달까지 실제 금액(650,000원)으로 추정');
   });
   it('복사한 데이터도 백업으로 저장·복원된다 (저장 구조 변경 없음)', () => {
     const d = sample();

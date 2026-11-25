@@ -77,7 +77,7 @@ describe('2. 먼저 확인할 문제: 영향 금액을 영업이익 기준으로
     expect(top.map((f) => f.id).slice(0, 2)).toEqual(['delivery-unit-profit-down', 'hall-visitors-down']);
     expect(Math.round(top[0].impact! / 10000)).toBe(-317);
     expect(top.every((f) => f.impactBasis !== 'sales')).toBe(true);
-    expect(impactText(top[0])).toBe('이익 영향 −317만 원');
+    expect(impactText(top[0])).toBe('추정 이익 영향 −317만 원');
   });
   it('진단 ④의 주문 수 증가도 같은 기준: 배달 +469만(매출) → 늘어난 주문 × 비교 기간 1건당 남는 금액', () => {
     const f = find('delivery-orders-up');
@@ -90,7 +90,7 @@ describe('2. 먼저 확인할 문제: 영향 금액을 영업이익 기준으로
   it('이익으로 바꿀 수 없는 평균 주문금액 하락은 "매출 영향"으로 표시하고 이익 항목 뒤에 둔다', () => {
     const f = find('delivery-aov-down');
     expect(f.impactBasis).toBe('sales');
-    expect(impactText(f)).toMatch(/^매출 영향 −/);
+    expect(impactText(f)).toMatch(/^추정 매출 영향 −/);
     const sorted = byImpact(dx.findings);
     const firstSales = sorted.findIndex((x) => x.impactBasis === 'sales');
     const lastProfit = sorted.map((x) => x.impact !== null && x.impactBasis !== 'sales').lastIndexOf(true);
@@ -113,8 +113,8 @@ describe('3. 성과 확인: 영업일 수 차이와 대상 외 판매 방식 변
     expect(ctx.opPerDay.before).toBeCloseTo(b.operatingProfit.value! / 11, 6);
     expect(ctx.opPerDay.after).toBeCloseTo(a.operatingProfit.value! / 12, 6);
   });
-  it('전체 영업이익 +73만 중 대상 포장 +23만, 홀 +44만 → 대상 외 변화가 더 큼', () => {
-    expect(Math.round(ctx.opDelta! / 10000)).toBe(73);
+  it('전체 영업이익 +75만 중 대상 포장 +23만, 홀 +44만 → 대상 외 변화가 더 큼', () => {
+    expect(Math.round(ctx.opDelta! / 10000)).toBe(75);
     expect(Math.round(ctx.targetDelta! / 10000)).toBe(23);
     expect(Math.round(ctx.channelDelta.hall! / 10000)).toBe(44);
     expect(ctx.outweighing).toEqual(['hall']);

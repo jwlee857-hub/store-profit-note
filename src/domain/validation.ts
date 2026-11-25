@@ -1,5 +1,5 @@
 import { isValidDate, overlapDays } from './dates';
-import { josa } from './format';
+import { fmt, josa } from './format';
 import { applicableCategories, isOpenDay, routeHasPlatform } from './calc';
 import { CATEGORY_LABEL, CHANNEL_LABEL, DIRECT_LABEL } from './labels';
 import { DIRECT_CATEGORIES, type AppData, type PeriodCost, type SalesEntry } from './types';
@@ -41,7 +41,7 @@ export function validateSalesEntry(e: SalesEntry, data: AppData): ValidationResu
     if (e.storeDiscount === null && !errors.storeDiscount) errors.storeDiscount = '가게 부담 할인이 없었다면 0을 입력하세요. 모르면 "할인·환불 반영 후 매출" 기준으로 입력하세요.';
     if (e.refund === null && !errors.refund) errors.refund = '환불이 없었다면 0을 입력하세요.';
     if (e.gross !== null && (e.storeDiscount ?? 0) + (e.refund ?? 0) > e.gross)
-      errors.refund = '할인액과 환불액의 합이 상품 판매액보다 큽니다. 이미 반영된 금액을 다시 넣지 않았는지 확인하세요.';
+      errors.refund = `할인·환불 합계가 판매액 ${fmt(e.gross, 'won')}을 초과합니다. 이미 반영된 금액을 다시 넣지 않았는지 확인하세요.`;
   }
 
   if (e.orders !== null && amount !== null) {
@@ -60,6 +60,10 @@ export function validateSalesEntry(e: SalesEntry, data: AppData): ValidationResu
     }
   } else if (e.visitors !== null) {
     errors.visitors = '방문 고객 수는 홀에서만 사용합니다.';
+  }
+  if (e.meals !== null && e.meals !== undefined) {
+    if (e.channel !== 'hall') errors.meals = '제공 식수는 홀에서만 사용합니다.';
+    else if (!isNonNegInt(e.meals)) errors.meals = '제공 식수는 0 이상의 정수입니다.';
   }
 
   for (const cat of DIRECT_CATEGORIES) {

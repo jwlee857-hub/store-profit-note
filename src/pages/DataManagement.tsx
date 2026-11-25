@@ -1,4 +1,4 @@
-import { useRef } from 'react';
+import { useRef, useState } from 'react';
 import { Button, Card, More, Notice } from '../components/ui';
 import { todayStr } from '../domain/dates';
 import type { AppData } from '../domain/types';
@@ -102,16 +102,66 @@ export function StorageGuide() {
   );
 }
 
+/** 이 기기에서 백업 파일을 마지막으로 내보낸 시각 (기기별 기록) */
+const LAST_EXPORT_KEY = 'restaurant-profit-beta:last-export';
+const readLastExport = () => {
+  try {
+    return localStorage.getItem(LAST_EXPORT_KEY);
+  } catch {
+    return null;
+  }
+};
+
+/** 백업 파일 내보내기 + 이 기기의 마지막 백업 시각 기록 (설정 첫 화면과 백업·복원 카드 공통) */
+function useBackup() {
+  const { data, toast } = useApp();
+  const [lastExport, setLastExport] = useState(readLastExport);
+  const run = () => {
+    if (!data) return;
+    exportJson(data);
+    // 첫 백업이면 다른 기기로 옮기는 방법을 함께 알려준다 (이 기기에서 한 번만)
+    const first = !readLastExport();
+    const now = new Date().toISOString();
+    try {
+      localStorage.setItem(LAST_EXPORT_KEY, now);
+    } catch {
+      // 기록하지 못해도 백업 파일은 이미 내보냈다
+    }
+    setLastExport(now);
+    if (first)
+      toast({ text: '백업 파일을 저장했어요', detail: '다른 기기로 옮기려면: 파일을 메일·메신저 ‘나에게 보내기’로 보낸 뒤, 그 기기에서 ‘백업 파일 불러오기’를 누르세요. 그 기기의 데이터는 파일 내용으로 바뀌어요.' }, 'info');
+  };
+  return { lastExport, run };
+}
+
+const lastText = (iso: string | null) => (iso ? new Date(iso).toLocaleDateString('ko-KR', { month: 'long', day: 'numeric' }) : '아직 없음');
+
+/** 설정 첫 화면의 바로 백업 */
+export function BackupNow() {
+  const { lastExport, run } = useBackup();
+  return (
+    <div aria-label="바로 백업" className="flex flex-wrap items-center justify-between gap-2 rounded-xl bg-white px-4 py-3 shadow-sm ring-1 ring-slate-200">
+      <span className="text-sm text-slate-800">
+        마지막 백업: <b>{lastText(lastExport)}</b>
+      </span>
+      <Button size="sm" variant="primary" onClick={run}>
+        지금 백업 파일 저장
+      </Button>
+    </div>
+  );
+}
+
 export function DataManagement() {
   const { data, replaceAll, confirm, navigate } = useApp();
+  const { lastExport, run } = useBackup();
   if (!data) return null;
   return (
-    <Card title="저장과 백업" subtitle={`저장 형식 v${data.schemaVersion} · 마지막 저장 ${new Date(data.updatedAt).toLocaleString('ko-KR')}`}>
+    <Card title="백업·복원" subtitle={`마지막 백업 ${lastText(lastExport)} · 이 기기에 마지막으로 저장한 시각 ${new Date(data.updatedAt).toLocaleString('ko-KR')} · 저장 형식 v${data.schemaVersion}`}>
       <Notice className="mb-3">
         <StorageGuide />
       </Notice>
       <div className="flex flex-wrap gap-2">
-        <Button variant="primary" onClick={() => exportJson(data)}>
+        <Button variant="primary" onClick={run}>
           백업 파일 저장
         </Button>
         <ImportButton />

@@ -3,7 +3,7 @@ import { PRE_MIGRATION_PREFIX, RECOVERY_KEY, STORAGE_KEY, loadFromStorage, parse
 import { computeSummary, effectiveCost, grossSales, missingCostCount, netSales, profitForDisplay } from './calc';
 import { diagnose, homeHeadline, topIssues } from './diagnosis';
 import { solutionDraft } from './draft';
-import { ENTRY_STATUS_LABEL, dayInputStatus, entryStatus, fillEstimates, switchAmountMode } from './entry';
+import { ENTRY_STATUS_LABEL, dayInputStatus, entryStatus, fillEstimates, salesSlots, switchAmountMode } from './entry';
 import { estimateFees, feeBaseAmount } from './estimate';
 import { emptyData, newSalesEntry, newSolution } from './factory';
 import { fmtKpiTarget, josa, kpiTargetSuffix } from './format';
@@ -32,7 +32,20 @@ function testStore(): AppData {
   ];
   return d;
 }
-const RANGE = { start: '2026-11-02', end: '2026-11-08' };
+/** 기록이 있는 하루 (그 주의 다른 영업일은 마감 미입력이라 부분 합계가 된다) */
+const RANGE = { start: '2026-11-03', end: '2026-11-03' };
+/** 홀만 운영하는 가게 (배달 경로가 미입력으로 잡히지 않게) */
+const hallOnly = () => {
+  const d = testStore();
+  d.store!.channels = ['hall'];
+  return d;
+};
+/** 그날 기록하지 않은 경로를 '매출 없음'으로 확인 (홈과 같은 입력 현황 기준으로 그날을 다 채운다) */
+const checkRest = (d: AppData, date: string) => {
+  for (const s of salesSlots(d))
+    if (!d.sales.some((e) => e.date === date && e.channel === s.channel && e.routeId === s.routeId))
+      d.salesChecks.push({ date, channel: s.channel, routeId: s.routeId, status: 'noSales', checkedAt: '' });
+};
 const hallCosts = (e: SalesEntry, food: number) => {
   e.costs.food.actual = food;
   e.costs.payment.actual = 0;
@@ -76,7 +89,7 @@ describe('매출 금액 기준: 할인 전 판매액 vs 순매출 직접 입력'
 
 describe('미입력과 0원 구분', () => {
   it('순매출 빈칸은 미입력, 0은 0원', () => {
-    const d = testStore();
+    const d = hallOnly();
     d.sales = [newSalesEntry({ date: '2026-11-03', channel: 'hall', routeId: 'r_hall', orders: 0, amountMode: 'net', netInput: null })];
     const s1 = computeSummary(d, RANGE);
     expect(s1.totalSales.value).toBeNull();
@@ -103,7 +116,7 @@ describe('미입력과 0원 구분', () => {
 
 describe('비용 없이 매출만 저장', () => {
   it('비용이 없어도 검증 오류가 없고, 상태는 매출 입력 완료, 영업이익은 확정하지 않는다', () => {
-    const d = testStore();
+    const d = hallOnly();
     const e = newSalesEntry({ date: '2026-11-03', channel: 'hall', routeId: 'r_hall', orders: 4, amountMode: 'net', netInput: 40_000 });
     expect(Object.keys(validateSalesEntry(e, d).errors)).toEqual([]);
     d.sales = [e];
@@ -133,7 +146,7 @@ describe('비용 없이 매출만 저장', () => {
 describe('실제 비용이 추정 비용을 대체', () => {
   it('실제값이 있으면 추정값을 쓰지 않고 합산하지 않는다', () => {
     expect(effectiveCost({ actual: 9_000, estimated: 12_000, estimateBasis: '' })).toEqual({ amount: 9_000, status: 'actual' });
-    const d = testStore();
+    const d = hallOnly();
     const e = hallCosts(newSalesEntry({ date: '2026-11-03', channel: 'hall', routeId: 'r_hall', orders: 4, amountMode: 'net', netInput: 40_000 }), 9_000);
     e.costs.food.estimated = 12_000;
     d.sales = [e];
@@ -250,6 +263,7 @@ describe('1단계 재현: 빠른 저장 뒤에도 홈 영업이익 숫자가 보
     const data2 = generateSample('2026-11-15');
     quickSave(data2, { channel: 'hall', routeId: 'route_hall', netInput: 650_000, orders: 30, cardSales: 500_000 });
     quickSave(data2, { channel: 'delivery', routeId: 'route_app_a', netInput: 700_000, orders: 36, refund: 0 });
+    checkRest(data2, '2026-11-16'); // 배달앱 B·포장은 그날 매출 없음으로 확인 (빠진 경로가 있으면 부분 합계라 확정하지 않는다)
     const s2 = computeSummary(data2, recentRanges(data2).cur);
     expect(s2.status.missing.filter((m) => m.kind === 'cost')).toEqual([]);
     expect(s2.operatingProfit.value).not.toBeNull();
@@ -276,12 +290,12 @@ describe('1단계 재현: 빠른 저장 뒤에도 홈 영업이익 숫자가 보
     expect(fillEstimates(e, data).entry.costs.delivery).toEqual(e.costs.delivery);
   });
   it('기본값이 없는 가게: 숫자는 입력된 비용만 반영한 잠정값으로 보이고, 미확정·미입력 개수를 함께 알린다', () => {
-    const d = testStore();
+    const d = hallOnly();
     d.sales = [
       hallCosts(newSalesEntry({ date: '2026-11-03', channel: 'hall', routeId: 'r_hall', orders: 10, amountMode: 'net', netInput: 100_000 }), 30_000),
       newSalesEntry({ date: '2026-11-10', channel: 'hall', routeId: 'r_hall', orders: 10, amountMode: 'net', netInput: 120_000 }),
     ];
-    const cur = computeSummary(d, { start: '2026-11-09', end: '2026-11-15' });
+    const cur = computeSummary(d, { start: '2026-11-10', end: '2026-11-10' });
     const prev = computeSummary(d, RANGE);
     expect(cur.operatingProfit.value).toBeNull();
     expect(profitForDisplay(cur.operatingProfit)).toEqual({ amount: 120_000, provisional: true });

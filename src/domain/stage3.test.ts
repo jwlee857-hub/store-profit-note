@@ -1,7 +1,7 @@
 // 3차 개선 1단계: 숫자가 틀리게 나오던 오류. 격리된 샘플 데이터만 사용한다(localStorage 사용 안 함).
 // 샘플은 2026-11-15(일)까지 생성 → 마지막 매출 입력일 2026-11-14(토), 오늘 2026-11-17(화) 상황을 재현한다.
 import { describe, expect, it } from 'vitest';
-import { allocatePeriodCost, allocatePeriodCostCounted, computeComparison, computeSummary, getMetric, profitForDisplay, unrecordedDays } from './calc';
+import { allocatePeriodCost, basisText, computeComparison, computeSummary, getMetric, profitForDisplay, unrecordedDays } from './calc';
 import { diagnose, diagnoseSummaries, quantityPriceText, topIssues, type QuantityPriceRow } from './diagnosis';
 import { josa } from './format';
 import { presetRanges, referenceDate } from './periods';
@@ -47,24 +47,28 @@ describe('1-1 이번 달·이번 주는 마지막 매출 입력일까지', () =>
 describe('1-2 선택 항목(홀 방문 고객 수) 하루 누락이 기간 전체를 지우지 않는다', () => {
   it('손님 수가 입력된 날만으로 계산하고 "N일 중 M일 기준"을 붙인다', () => {
     const d = sample();
+    copyDay(d, '2026-11-09', '2026-11-16');
     copyDay(d, '2026-11-10', '2026-11-17', () => true, (e) => (e.channel === 'hall' ? { ...e, visitors: null } : e));
     const { s, dx, issues } = homeView(d, 'recent28');
     const v = getMetric(s, { key: 'visitors', channel: 'hall' });
     expect(v.value).toBeGreaterThan(0);
-    expect(v.basis).toEqual({ used: 21, total: 22, unit: '일' });
+    expect(v.basis).toEqual({ used: 22, total: 23, unit: '일' });
     expect(s.channels.hall.avgTicket.value).toBeGreaterThan(0);
-    expect(s.channels.hall.avgTicket.basis?.used).toBe(21);
+    expect(s.channels.hall.avgTicket.basis?.used).toBe(22);
     // 문제 순위도 같은 값으로: 모든 날에 입력했을 때와 같은 순서이고, 홀 방문 고객 수 감소에 기준 표시가 붙는다
     const full = sample();
+    copyDay(full, '2026-11-09', '2026-11-16');
     copyDay(full, '2026-11-10', '2026-11-17');
     expect(issues.map((f) => f.id)).toEqual(homeView(full, 'recent28').issues.map((f) => f.id));
-    expect(issues.find((f) => f.id === 'hall-visitors-down')!.fact).toContain('22일 중 21일 입력 기준');
+    expect(issues.find((f) => f.id === 'hall-visitors-down')!.fact).toContain('23일 중 22일 입력 기준');
     expect(dx.quantityPrice.find((q) => q.channel === 'hall')!.decomposition.ok).toBe(true);
   });
   it('손님 수가 빠진 날이 있어도 감소율이 부풀지 않는다 (같은 날을 입력했을 때와 같음)', () => {
     const withV = sample();
+    copyDay(withV, '2026-11-09', '2026-11-16');
     copyDay(withV, '2026-11-10', '2026-11-17');
     const noV = sample();
+    copyDay(noV, '2026-11-09', '2026-11-16');
     copyDay(noV, '2026-11-10', '2026-11-17', () => true, (e) => (e.channel === 'hall' ? { ...e, visitors: null } : e));
     const a = homeView(withV, 'recent28').issues.find((f) => f.id === 'hall-visitors-down')!;
     const b = homeView(noV, 'recent28').issues.find((f) => f.id === 'hall-visitors-down')!;
@@ -77,14 +81,16 @@ describe('1-2 선택 항목(홀 방문 고객 수) 하루 누락이 기간 전�
     expect(issues.map((f) => f.id).slice(0, 2)).toEqual(['delivery-unit-profit-down', 'hall-visitors-down']);
     expect(Math.round(issues[1].impact!)).toBe(-2_137_648);
   });
-  it('할인·환불 상세가 없는 기록이 있어도 상세가 있는 기록만으로 할인 비율을 계산한다', () => {
+  it('할인·환불 상세가 없는 기록이 있으면 확인된 할인 합계만 보여주고, 할인 비율 변화는 판정하지 않는다', () => {
     const d = sample();
     const e = d.sales.find((x) => x.date === '2026-11-13' && x.channel === 'delivery')!;
     Object.assign(e, { amountMode: 'net', netInput: 500_000, storeDiscount: null, refund: null, gross: null });
     const { dx } = homeView(d, 'recent28');
-    const f = dx.findings.find((x) => x.id === 'delivery-discount-up');
-    expect(f).toBeDefined();
-    expect(f!.fact).toMatch(/분석 기간 \d+건 중 \d+건 기준/);
+    expect(dx.findings.find((x) => x.id === 'delivery-discount-up')).toBeUndefined();
+    expect(dx.caveats.join(' ')).toContain('할인 비율 변화는 판정하지 않습니다');
+    const disc = getMetric(dx.cur, { key: 'storeDiscount', channel: 'delivery' });
+    expect(disc).toMatchObject({ value: null, salesGap: true, note: '확인된 할인 합계' });
+    expect(basisText(disc.basis)).toMatch(/^매출 기록 \d+건 중 \d+건 확인$/);
   });
 });
 
@@ -100,39 +106,36 @@ describe('1-3 입력을 건너뛴 영업일은 0원으로 계산하지 않는다
     d.salesChecks.push({ date: '2026-11-16', channel: 'hall', routeId: 'route_hall', status: 'noSales', checkedAt: '2026-11-16T12:00:00.000Z' });
     expect(unrecordedDays(d, { start: '2026-11-14', end: '2026-11-17' })).toEqual([]);
   });
-  it('매출·영업일 수·기간 비용에서 빼고, 비교 기간도 같은 순서의 날을 뺀다', () => {
+  it('5차 수정: 빼지 않고 부분 합계로 둔다 — 영업일 수·기간 비용은 그대로, 비교 기간 합계는 바뀌지 않고, 증감 판정은 보류', () => {
     const d = skipped();
     const { r, s, p, dx } = homeView(d, 'recent28');
     expect(r.cur).toEqual({ start: '2026-10-21', end: '2026-11-17' });
     expect(s.unrecordedDays).toEqual(['2026-11-16']);
-    expect(p.pairedExcluded).toEqual(['2026-10-19']);
-    expect(s.businessDays).toBe(22);
-    expect(p.businessDays).toBe(23);
-    // 월세: 28일 중 27일치만
+    expect(s.businessDays).toBe(23);
+    // 비교 기간은 따로 집계 (분석 기간의 빈 날 때문에 바뀌지 않음)
+    expect(p.totalSales).toEqual(computeSummary(d, r.prev).totalSales);
+    // 월세는 28일 전체
     const rent = d.periodCosts.filter((x) => x.category === 'rent');
-    const full = rent.reduce((a, x) => a + allocatePeriodCost(x, r.cur), 0);
-    const counted = rent.reduce((a, x) => a + allocatePeriodCostCounted(x, r.cur, new Set(['2026-11-16'])), 0);
-    expect(s.commonByCategory.rent.actual).toBeCloseTo(counted);
-    expect(counted).toBeLessThan(full);
-    // "매출 감소"가 새로 생기지 않는다 (예전: −4~5%)
-    const s1 = s.totalSales.value!;
-    const s0 = p.totalSales.value!;
-    expect(Math.abs(s1 - s0) / s0).toBeLessThan(0.03);
-    expect(dx.findings.some((f) => f.id === 'common-rent')).toBe(false);
+    expect(s.commonByCategory.rent.actual).toBeCloseTo(rent.reduce((a, x) => a + allocatePeriodCost(x, r.cur), 0));
+    // 0원으로 보지 않고 부분 합계: 매출 감소·월세 증가를 판정하지 않는다
+    expect(s.totalSales).toMatchObject({ value: null, salesGap: true });
+    expect(dx.totalDelta).toBeNull();
+    expect(dx.findings.some((f) => f.id === 'common-rent' || f.id.endsWith('-orders-down') || f.id === 'hall-visitors-down')).toBe(false);
   });
   it('일별 추이에는 미입력 표시가 남는다', () => {
     const { s } = homeView(skipped(), 'recent28');
     expect(s.daily.find((x) => x.date === '2026-11-16')!.unrecorded).toBe(true);
     expect(s.daily.find((x) => x.date === '2026-11-17')!.unrecorded).toBe(false);
   });
-  it('첫 기록 이전 날짜(가게 사용 전)도 기간 비용을 넣지 않는다', () => {
+  it('첫 기록 이전 날짜(가게 사용 전)는 미입력이 아니고 기간 계산에서 뺀다', () => {
     const d = sample();
     d.sales = d.sales.filter((e) => e.date >= '2026-11-10');
     const s = computeSummary(d, { start: '2026-11-01', end: '2026-11-14' });
-    // 기록 있는 영업일 11.10~11.14(5일) + 정기 휴무 일요일 11.01·11.08(2일) → 월세는 7일치 (미입력 영업일 7일은 뺌)
+    // 기록 있는 영업일 11.10~11.14(5일)만. 그 전 9일(정기 휴무 포함)은 가게 사용 전 → 월세도 5일치
     expect(s.businessDays).toBe(5);
-    expect(s.unrecordedDays).toHaveLength(7);
-    expect(s.commonByCategory.rent.actual).toBeCloseTo((2_500_000 * 7) / 30);
+    expect(s.unrecordedDays).toEqual([]);
+    expect(s.totalSales.salesGap).toBeUndefined();
+    expect(s.commonByCategory.rent.actual).toBeCloseTo((2_500_000 * 5) / 30);
   });
 });
 
@@ -165,10 +168,10 @@ describe('1-5 홈과 문제 진단의 기간·영업이익이 같다', () => {
     const dx = diagnose(d, prob);
     expect(profitForDisplay(dx.cur.operatingProfit).amount).toBe(profitForDisplay(home.s.operatingProfit).amount);
   });
-  it('샘플: 10.18~11.14, 영업이익 3,654,152원', () => {
+  it('샘플: 10.18~11.14, 영업이익 3,677,486원', () => {
     const d = sample();
     expect(d.problems[0].analysis).toEqual({ start: '2026-10-18', end: '2026-11-14' });
-    expect(Math.round(profitForDisplay(diagnose(d, d.problems[0]).cur.operatingProfit).amount!)).toBe(3_654_152);
+    expect(Math.round(profitForDisplay(diagnose(d, d.problems[0]).cur.operatingProfit).amount!)).toBe(3_677_486);
   });
 });
 

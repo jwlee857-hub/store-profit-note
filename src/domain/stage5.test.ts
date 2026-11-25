@@ -11,7 +11,7 @@ import { couponText } from './format';
 import { easyMetricName, metricLabelEasy } from './labels';
 import { pendingEntries, pendingEstimates } from './pending';
 import { generateSample } from './sample';
-import { DELIVERY_KPI_SET, defaultKpisFor, suggestedCoupon } from './templates';
+import { DELIVERY_KPI_SET, defaultKpisFor } from './templates';
 import { SCHEMA_VERSION, type AppData } from './types';
 
 const data = () => generateSample('2026-11-19');
@@ -31,7 +31,7 @@ describe('저장 형식 v6 마이그레이션', () => {
     expect(parsed.data.schemaVersion).toBe(SCHEMA_VERSION);
     for (const s of parsed.data.solutions) {
       expect(s.extraKpis).toEqual([]);
-      expect(s.coupon).toEqual({ amount: null, minOrder: null });
+      expect(s.coupon).toEqual({ amount: null, minOrder: null, routeId: null, previousAmount: null, usedCount: null });
       expect(s.review.nextCouponAmount).toBeNull();
     }
     // 주 성과지표·목표·검토 기간과 매출·비용 계산은 바뀌지 않는다
@@ -44,7 +44,7 @@ describe('저장 형식 v6 마이그레이션', () => {
     const before = JSON.stringify(raw);
     const m = migrate(raw, 5) as { solutions: { coupon: unknown; extraKpis: unknown; review: { nextCouponAmount: unknown } }[] };
     expect(JSON.stringify(raw)).toBe(before);
-    expect(m.solutions[0].coupon).toEqual({ amount: null, minOrder: 12000 });
+    expect(m.solutions[0].coupon).toMatchObject({ amount: null, minOrder: 12000 });
     expect(m.solutions[0].extraKpis).toEqual([{ key: 'orders', channel: 'delivery' }]);
     expect(m.solutions[0].review.nextCouponAmount).toBe(2000);
   });
@@ -53,7 +53,7 @@ describe('저장 형식 v6 마이그레이션', () => {
     d.solutions[0].review.nextCouponAmount = 2000;
     const p = parseBackup(serialize(d));
     expect(p.ok && p.data.solutions[0].review.nextCouponAmount).toBe(2000);
-    expect(p.ok && p.data.solutions[0].coupon).toEqual({ amount: 3000, minOrder: 15000 });
+    expect(p.ok && p.data.solutions[0].coupon).toEqual({ amount: 3000, minOrder: 15000, routeId: 'route_app_a', previousAmount: 1000, usedCount: null });
   });
 });
 
@@ -119,22 +119,19 @@ describe('6. 쿠폰·할인 비용을 원 단위로', () => {
   });
 });
 
-describe('7. 쿠폰 조건 기록과 다음 계획 기본값', () => {
-  it('결과 판단의 다음 기간 쿠폰 금액을 새 계획의 쿠폰 금액 기본값으로 쓴다 (같은 판매 방식 우선)', () => {
+describe('7. 쿠폰 조건 기록', () => {
+  it('진단에서 만든 새 계획 초안은 다른 계획의 다음 쿠폰 금액을 가져오지 않는다 (재시험에서만 승계 — stage7.test)', () => {
     const d = data();
-    expect(suggestedCoupon(d.solutions, 'delivery')).toBeNull();
     const del = d.solutions.find((s) => s.target === 'delivery')!;
     del.review = { ...del.review, nextCouponAmount: 2000, reviewedAt: '2026-11-20T10:00:00.000Z' };
-    const tk = d.solutions.find((s) => s.target === 'takeout')!;
-    tk.review = { ...tk.review, nextCouponAmount: 500, reviewedAt: '2026-11-21T10:00:00.000Z' };
-    expect(suggestedCoupon(d.solutions, 'delivery')!.amount).toBe(2000);
-    expect(suggestedCoupon(d.solutions, 'hall')!.amount).toBe(500); // 같은 대상이 없으면 가장 최근
     const draft = solutionDraft(d, d.problems[0], 'delivery-unit-profit-down');
-    expect(draft.coupon).toEqual({ amount: 2000, minOrder: null });
+    expect(draft.coupon).toEqual(newSolution().coupon);
   });
   it('쿠폰 조건 한 줄 표시', () => {
     expect(couponText({ amount: 3000, minOrder: 15000 })).toBe('쿠폰 3,000원 · 최소 주문 15,000원');
-    expect(couponText({ amount: 0, minOrder: null })).toBe('쿠폰 없음');
+    expect(couponText({ amount: 0, minOrder: null })).toBe('쿠폰 0원(중단)');
+    expect(couponText({ amount: 2000, minOrder: 15000, previousAmount: 3000 }, '배달앱 A')).toBe('배달앱 A · 쿠폰 3,000원 → 2,000원 · 최소 주문 15,000원');
+    expect(couponText({ amount: null, minOrder: null, previousAmount: 3000 })).toBe('쿠폰 3,000원 → 미정');
     expect(couponText(newSolution().coupon)).toBeNull();
   });
 });

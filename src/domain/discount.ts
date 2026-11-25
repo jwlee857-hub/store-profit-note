@@ -1,6 +1,6 @@
 // 쿠폰·할인 비용을 원 단위로 비교하고, "할인 1,000원당 늘어난 주문 수 / 남은 금액"을 계산한다.
 // 단순 전후 비교라 할인 외 요인(날씨·노출·메뉴 변경 등)이 섞여 있다. 원인 효과로 단정하지 않는다.
-import { discountCalc, displayValue, type ChannelSummary, type PeriodSummary } from './calc';
+import { comparableValue, discountCalc, type ChannelSummary, type PeriodSummary } from './calc';
 import { fmt } from './format';
 import type { Calc, Channel } from './types';
 
@@ -41,11 +41,13 @@ export const MIN_DISCOUNT_DELTA = 10_000;
 const fullOrders = (c: ChannelSummary) => (c.entryCount && c.ordersDays === c.entryDays ? c.orders : null);
 
 export function discountRow(prev: ChannelSummary, cur: ChannelSummary): DiscountRow {
+  // 할인 금액을 다 알 때만(빠진 경로·날, 상세 없는 기록 없음) 주문당·비율을 계산한다
+  const known = (c: ChannelSummary) => discountCalc(c).value !== null;
   const per = (c: ChannelSummary) => {
     const q = fullOrders(c);
-    return q && !c.detailMissing ? c.discount / q : null;
+    return q && known(c) ? c.discount / q : null;
   };
-  const rate = (c: ChannelSummary) => (c.gross ? (c.discount / c.gross) * 100 : null);
+  const rate = (c: ChannelSummary) => (c.gross && known(c) ? (c.discount / c.gross) * 100 : null);
   return { channel: cur.channel, prev: discountCalc(prev), cur: discountCalc(cur), prevPerOrder: per(prev), curPerOrder: per(cur), prevRate: rate(prev), curRate: rate(cur) };
 }
 
@@ -53,14 +55,16 @@ export function discountEfficiency(p: PeriodSummary, c: PeriodSummary, ch: Chann
   const a = p.channels[ch];
   const b = c.channels[ch];
   if (!a.entryCount || !b.entryCount) return { ok: false, reason: '두 기간 모두 매출 기록이 있어야 계산할 수 있어요.' };
+  if (a.coverage.missing.length || b.coverage.missing.length)
+    return { ok: false, reason: '매출 기록이 빠진 경로·날이 있어 할인 효율을 계산하지 않아요. 빠진 기록을 채우거나 매출 없음으로 확인하면 계산합니다.' };
   if (a.detailMissing || b.detailMissing)
     return { ok: false, reason: '할인·환불 상세 없이 순매출만 입력한 기록이 있어 할인액 합계를 정확히 알 수 없어요. 상세를 입력하면 계산합니다.' };
   if (a.salesMissing || b.salesMissing) return { ok: false, reason: '매출 금액이 빠진 기록이 있어 계산하지 않아요.' };
   const q0 = fullOrders(a);
   const q1 = fullOrders(b);
   if (q0 === null || q1 === null) return { ok: false, reason: '주문 수가 빠진 날이 있어 주문 수 변화를 계산하지 않아요.' };
-  const dp0 = displayValue(a.directProfit);
-  const dp1 = displayValue(b.directProfit);
+  const dp0 = comparableValue(a.directProfit);
+  const dp1 = comparableValue(b.directProfit);
   if (dp0 === null || dp1 === null) return { ok: false, reason: '판매 방식 비용을 알 수 없어 남은 금액 변화를 계산하지 않아요.' };
   const deltaDiscount = b.discount - a.discount;
   if (Math.abs(deltaDiscount) < MIN_DISCOUNT_DELTA)
