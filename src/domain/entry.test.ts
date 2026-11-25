@@ -32,7 +32,8 @@ function testStore(): AppData {
   ];
   return d;
 }
-const RANGE = { start: '2026-11-02', end: '2026-11-08' };
+/** 기록이 있는 하루 (그 주의 다른 영업일은 마감 미입력이라 부분 합계가 된다) */
+const RANGE = { start: '2026-11-03', end: '2026-11-03' };
 /** 홀만 운영하는 가게 (배달 경로가 미입력으로 잡히지 않게) */
 const hallOnly = () => {
   const d = testStore();
@@ -294,7 +295,7 @@ describe('1단계 재현: 빠른 저장 뒤에도 홈 영업이익 숫자가 보
       hallCosts(newSalesEntry({ date: '2026-11-03', channel: 'hall', routeId: 'r_hall', orders: 10, amountMode: 'net', netInput: 100_000 }), 30_000),
       newSalesEntry({ date: '2026-11-10', channel: 'hall', routeId: 'r_hall', orders: 10, amountMode: 'net', netInput: 120_000 }),
     ];
-    const cur = computeSummary(d, { start: '2026-11-09', end: '2026-11-15' });
+    const cur = computeSummary(d, { start: '2026-11-10', end: '2026-11-10' });
     const prev = computeSummary(d, RANGE);
     expect(cur.operatingProfit.value).toBeNull();
     expect(profitForDisplay(cur.operatingProfit)).toEqual({ amount: 120_000, provisional: true });

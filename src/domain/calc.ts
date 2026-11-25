@@ -1,5 +1,5 @@
 // 핵심 계산 순수 함수. UI·저장소에 의존하지 않는다.
-import { addDays, daysInclusive, eachDay, inRange, overlapDays, weekday } from './dates';
+import { daysInclusive, eachDay, inRange, overlapDays, weekday } from './dates';
 import { costKindOf } from './costBasis';
 import { CATEGORY_LABEL, CHANNEL_LABEL, DIRECT_LABEL } from './labels';
 import {
@@ -17,6 +17,7 @@ import {
   type DateStr,
   type DirectCategory,
   type MetricRef,
+  type OrderRoute,
   type PeriodCost,
   type SalesEntry,
 } from './types';
@@ -105,10 +106,7 @@ export function allocatePeriodCost(pc: Pick<PeriodCost, 'start' | 'end' | 'amoun
   return (pc.amount * ov) / total;
 }
 
-/**
- * 기간 비용 중 계산에 넣는 날짜만큼의 금액. excluded(미입력 영업일)는 대상 기간에서 뺀다.
- * excluded가 비어 있으면 allocatePeriodCost와 같다.
- */
+/** 기간 비용 중 계산에 넣는 날짜만큼의 금액. excluded(가게 사용 전 날짜)는 대상 기간에서 뺀다 */
 export function allocatePeriodCostCounted(pc: Pick<PeriodCost, 'start' | 'end' | 'amount'>, range: DateRange, excluded: ReadonlySet<DateStr>): number {
   const total = daysInclusive(pc.start, pc.end);
   if (total <= 0) return 0;
@@ -116,6 +114,14 @@ export function allocatePeriodCostCounted(pc: Pick<PeriodCost, 'start' | 'end' |
   if (ov === 0) return 0;
   for (const d of excluded) if (d >= pc.start && d <= pc.end && inRange(d, range)) ov--;
   return (pc.amount * ov) / total;
+}
+
+/** 기록을 시작한 날: 가장 이른 매출 기록·'매출 없음' 확인 날짜. 그 전은 가게가 앱을 쓰기 전이라 미입력으로 세지 않는다 */
+export function trackingStart(data: Pick<AppData, 'sales'> & { salesChecks?: AppData['salesChecks'] }): DateStr | null {
+  let min: DateStr | null = null;
+  for (const e of data.sales) if (!min || e.date < min) min = e.date;
+  for (const c of data.salesChecks ?? []) if (!min || c.date < min) min = c.date;
+  return min;
 }
 
 /** 해당 날짜·채널에 같은 항목의 기간 비용이 등록되어 있는가 (일별 미입력을 기간 비용이 대신하는지) */
@@ -136,11 +142,20 @@ export function coveredByPeriodCost(
 
 /**
  * 배달앱 정산서 기간 합계(경로 지정 기간 비용)가 이 기록의 수수료를 대신하는가.
- * 대신하면 그 기록의 계산·추정 수수료는 계산에서 빼고(실제값은 남김) 미입력으로도 세지 않는다 — 기간 합계와 두 번 더하지 않게.
+ * 대신하면 그 범위 수수료의 최종 금액은 기간 합계다: 기록의 계산·추정·일별 실제 수수료는 합계에 더하지 않고(일별 실제액은 내역으로만 남김)
+ * 미입력으로도 세지 않는다 — 일별 금액과 기간 합계를 어떤 순서로 넣든 같은 비용이 된다.
  */
 export function settledByPeriod(periodCosts: PeriodCost[], e: Pick<SalesEntry, 'routeId' | 'channel' | 'date'>): boolean {
-  return periodCosts.some((pc) => pc.routeId === e.routeId && pc.attribution === e.channel && e.date >= pc.start && e.date <= pc.end);
+  return !!settlementFor(periodCosts, e);
 }
+
+/** 이 기록의 수수료를 대신하는 정산서 기간 합계 (없으면 null) */
+export function settlementFor(periodCosts: PeriodCost[], e: Pick<SalesEntry, 'routeId' | 'channel' | 'date'>): PeriodCost | null {
+  return periodCosts.find((pc) => pc.routeId === e.routeId && pc.attribution === e.channel && e.date >= pc.start && e.date <= pc.end) ?? null;
+}
+
+/** 정산서 기간 합계가 있을 때 이 수수료 값을 합계에 더하는가: 확인 필요(이전 방식: 잔여액 + 일별 실제액)일 때 일별 실제액만 */
+export const countsUnderSettlement = (pc: PeriodCost, cv: CostValue) => pc.settlementBasis === 'unverified' && cv.actual !== null && cv.actual !== undefined;
 
 export function routeHasPlatform(data: Pick<AppData, 'routes'>, routeId: string): boolean {
   return !!data.routes.find((r) => r.id === routeId)?.platformId;
@@ -156,8 +171,8 @@ export function isOpenDay(data: Pick<AppData, 'store' | 'dayOverrides'>, date: D
 }
 
 /**
- * 미입력 영업일: 영업일인데 그날 매출 기록도 '매출 없음' 확인도 없는 날.
- * 입력을 건너뛴 날을 매출 0원으로 보지 않도록 기간 계산(매출·영업일 수·기간 비용)에서 뺀다.
+ * 마감 미입력 영업일: 영업일인데 그날 매출 기록도 '매출 없음' 확인도 없는 날.
+ * 0원으로 보지 않는다: 그날 운영한 경로가 모두 미입력이라 기간 합계는 부분 합계(salesGap)가 되고 증감 판정은 보류된다.
  */
 export function unrecordedDays(data: Pick<AppData, 'store' | 'dayOverrides' | 'sales'> & { salesChecks?: AppData['salesChecks'] }, range: DateRange): DateStr[] {
   const recorded = new Set<DateStr>();
@@ -176,12 +191,18 @@ export interface SalesSlot {
 
 const CHANNEL_NAME: Record<Channel, string> = { hall: '홀', delivery: '배달', takeout: '포장' };
 
-/** 가게가 운영하는 채널 × 그 채널에 연결된 주문 경로 (홈 입력 현황·성과 비교가 같은 목록을 쓴다) */
-export function salesSlots(data: Pick<AppData, 'store' | 'routes'>): SalesSlot[] {
+/** 그 날짜에 사용 중인 경로인가. 사용 시작일·종료일이 없는 경로(이전 데이터)는 항상 사용 중으로 본다 */
+export const routeActiveOn = (r: Pick<OrderRoute, 'activeFrom' | 'activeTo'>, date: DateStr) => (!r.activeFrom || date >= r.activeFrom) && (!r.activeTo || date <= r.activeTo);
+
+/**
+ * 가게가 운영하는 채널 × 그 채널에 연결된 주문 경로 (홈 입력 현황·성과 비교가 같은 목록을 쓴다).
+ * date를 주면 그날 사용 중인 경로만 — 새 경로를 추가하거나 사용을 끝내도 과거 날짜의 판정은 바뀌지 않는다
+ */
+export function salesSlots(data: Pick<AppData, 'store' | 'routes'>, date?: DateStr): SalesSlot[] {
   const out: SalesSlot[] = [];
   for (const ch of data.store?.channels ?? []) {
     // 경로 이름만으로는 판매 방식을 알 수 없는 경우가 많아(예: 전화 주문 = 포장) 항상 판매 방식을 붙인다
-    for (const r of data.routes.filter((r) => r.channels.includes(ch))) out.push({ channel: ch, routeId: r.id, label: `${r.name} · ${CHANNEL_NAME[ch]}` });
+    for (const r of data.routes.filter((r) => r.channels.includes(ch) && (!date || routeActiveOn(r, date)))) out.push({ channel: ch, routeId: r.id, label: `${r.name} · ${CHANNEL_NAME[ch]}` });
   }
   return out;
 }
@@ -214,17 +235,17 @@ export function channelCoverage(
   channel: Channel,
   days: readonly DateStr[],
 ): Coverage {
-  const slots = salesSlots(data).filter((s) => s.channel === channel);
+  const allSlots = salesSlots(data).filter((s) => s.channel === channel);
   const daySet = new Set(days);
   const entered = new Set<string>();
   for (const e of data.sales) if (e.channel === channel && daySet.has(e.date)) entered.add(`${e.date}|${e.routeId}`);
   const checked = new Set<string>();
   for (const c of data.salesChecks ?? []) if (c.channel === channel && c.status === 'noSales' && daySet.has(c.date)) checked.add(`${c.date}|${c.routeId}`);
-  if (!slots.length) return { state: entered.size ? 'complete' : 'notUsed', missing: [] };
+  if (!allSlots.length) return { state: entered.size ? 'complete' : 'notUsed', missing: [] };
   const missing: Coverage['missing'] = [];
   for (const d of days) {
     const open = isOpenDay(data, d);
-    for (const s of slots) {
+    for (const s of allSlots.filter((x) => routeActiveOn(data.routes.find((r) => r.id === x.routeId)!, d))) {
       const k = `${d}|${s.routeId}`;
       if (!entered.has(k) && !checked.has(k) && open) missing.push({ date: d, routeId: s.routeId });
     }
@@ -289,6 +310,9 @@ export interface ChannelSummary {
   ordersNet: number;
   visitorsDays: number;
   visitorsNet: number;
+  /** 제공 식수가 있는 날만 더한 값 (홀만). 그런 날이 없으면 null — 0끼와 구분 */
+  meals: number | null;
+  mealsDays: number;
   directCost: CostBucket;
   directByCategory: Record<DirectCategory | CommonCategory, CostBucket>;
   directCostCalc: Calc;
@@ -319,7 +343,7 @@ export interface DailyRow {
   takeout: number;
   total: number;
   open: boolean;
-  /** 미입력 영업일 (계산에서 뺌) */
+  /** 마감 미입력 영업일 */
   unrecorded: boolean;
 }
 
@@ -344,10 +368,8 @@ export interface PeriodSummary {
   /** 비용 근거별 합계: 실제 / 설정 기준 계산 / 추정 */
   status: { actualAmount: number; calculatedAmount: number; estimatedAmount: number; missingCount: number; missing: MissingItem[] };
   salesOnClosedDays: number;
-  /** 계산에서 뺀 미입력 영업일 (매출 기록도 '매출 없음' 확인도 없는 영업일) */
+  /** 마감 미입력 영업일 (매출 기록도 '매출 없음' 확인도 없는 영업일). 계산에서 빼지 않고 미입력으로 센다 */
   unrecordedDays: DateStr[];
-  /** 분석 기간의 미입력 영업일과 짝을 맞추려고 비교 기간에서 뺀 날 */
-  pairedExcluded: DateStr[];
 }
 
 function div(num: number, den: number | null, scale = 1): Calc {
@@ -388,29 +410,27 @@ function allCategoryBuckets(): Record<DirectCategory | CommonCategory, CostBucke
   return o;
 }
 
-/**
- * 두 기간 비교용 요약. 분석 기간의 미입력 영업일과 같은 순서(기간 시작부터 같은 날짜 수)에 있는 비교 기간의 날도 빼서,
- * 입력을 건너뛴 날 때문에 비교 기간보다 하루치가 적게 보이지 않게 한다.
- */
-export function computeComparison(data: AppData, cur: DateRange, prev: DateRange): { s: PeriodSummary; p: PeriodSummary } {
-  const s = computeSummary(data, cur);
-  const paired = s.unrecordedDays.map((d) => addDays(prev.start, daysInclusive(cur.start, d) - 1)).filter((d) => d <= prev.end);
-  return { s, p: computeSummary(data, prev, paired) };
+/** 두 기간 비교용 요약. 각 기간은 따로 집계한다 (한 기간의 입력이 바뀌어도 다른 기간 합계는 그대로) */
+export function computeComparison(data: AppData, cur: DateRange, prev: DateRange, weekdays?: readonly number[] | null): { s: PeriodSummary; p: PeriodSummary } {
+  return { s: computeSummary(data, cur, weekdays), p: computeSummary(data, prev, weekdays) };
 }
 
 /**
- * 기간 요약.
- * pairedExcluded: 비교를 맞추기 위해 추가로 뺄 날짜 (computeComparison에서만 사용)
+ * 기간 요약. 마감 미입력 영업일도 기간에 그대로 두고(영업일 수·기간 비용 포함) 그날 경로들을 미입력으로 센다.
+ * 기록을 시작하기 전 날짜(가게 사용 전)만 기간 계산에서 뺀다 — 새로 쓰기 시작한 가게가 지난 몇 주를 미입력으로 보지 않게.
+ * weekdays(0=일 ... 6=토)를 주면 그 요일 날짜만 센다: 매출·영업일·미입력은 그 요일만, 기간 비용(월세 등)은 달력 일수 안분 그대로 그 요일 날짜 몫만.
  */
-export function computeSummary(data: AppData, range: DateRange, pairedExcluded: readonly DateStr[] = []): PeriodSummary {
-  const unrecorded = unrecordedDays(data, range);
-  const unrecSet = new Set(unrecorded);
-  const paired = pairedExcluded.filter((d) => inRange(d, range) && !unrecSet.has(d));
-  const excluded = new Set([...unrecorded, ...paired]);
-  const allDays = eachDay(range);
-  // 미입력 영업일은 기간 계산(영업일 수·기간 비용·공통비 체크)에서 뺀다
+export function computeSummary(data: AppData, range: DateRange, weekdays?: readonly number[] | null): PeriodSummary {
+  const start = trackingStart(data);
+  const pick = weekdays?.length ? new Set(weekdays) : null;
+  const rangeDays = eachDay(range);
+  const allDays = pick ? rangeDays.filter((d) => pick.has(weekday(d))) : rangeDays;
+  // 계산에서 빼는 날: 기록 시작 전 + 고르지 않은 요일 (기간 비용 안분에서도 빠진다)
+  const excluded = new Set(rangeDays.filter((d) => !start || d < start || (pick && !pick.has(weekday(d)))));
   const days = allDays.filter((d) => !excluded.has(d));
-  const entries = data.sales.filter((e) => inRange(e.date, range) && !excluded.has(e.date));
+  const unrecorded = unrecordedDays(data, range).filter((d) => !excluded.has(d));
+  const unrecSet = new Set(unrecorded);
+  const entries = data.sales.filter((e) => inRange(e.date, range) && (!pick || pick.has(weekday(e.date))));
   const missing: MissingItem[] = [];
   let actualAmount = 0;
   let calculatedAmount = 0;
@@ -451,6 +471,7 @@ export function computeSummary(data: AppData, range: DateRange, pairedExcluded: 
     };
     const oc = dayCoverage((e) => e.orders);
     const vc = ch === 'hall' ? dayCoverage((e) => e.visitors) : { sum: 0, net: 0, days: 0 };
+    const mc = ch === 'hall' ? dayCoverage((e) => e.meals ?? null) : { sum: 0, net: 0, days: 0 };
     const entryDays = byDay.size;
     const orders: number | null = oc.days ? oc.sum : null;
     const visitors: number | null = ch === 'hall' && vc.days ? vc.sum : null;
@@ -473,11 +494,11 @@ export function computeSummary(data: AppData, range: DateRange, pairedExcluded: 
       }
       const hasPlatform = routeHasPlatform(data, e.routeId);
       const required = new Set(requiredCategories(ch, hasPlatform, e.bundledFee));
-      const settled = settledByPeriod(data.periodCosts, e);
+      const settled = settlementFor(data.periodCosts, e);
       for (const cat of DIRECT_CATEGORIES) {
         if (cat === 'payment' && e.bundledFee) continue; // 묶음 수수료면 결제 수수료를 따로 계산하지 않음
-        // 정산서 기간 합계가 대신하는 수수료: 일별 실제값만 남기고 계산·추정값은 빼며, 비어 있어도 미입력이 아니다
-        if (settled && (cat === 'brokerage' || cat === 'payment') && e.costs[cat].actual === null) continue;
+        // 정산서 기간 합계가 대신하는 수수료: 기간 합계만 더한다 (비어 있어도 미입력이 아니다)
+        if (settled && (cat === 'brokerage' || cat === 'payment') && !countsUnderSettlement(settled, e.costs[cat])) continue;
         const { amount } = effectiveCost(e.costs[cat]);
         // 금액은 실제값 우선 규칙 그대로, 근거(실제·설정 기준 계산·추정)는 저장된 근거 문구로 구분한다
         const kind = costKindOf(cat, e.costs[cat], e);
@@ -542,6 +563,8 @@ export function computeSummary(data: AppData, range: DateRange, pairedExcluded: 
       ordersNet: oc.net,
       visitorsDays: vc.days,
       visitorsNet: vc.net,
+      meals: hasData && mc.days ? mc.sum : null,
+      mealsDays: mc.days,
       directCost: bucket,
       directByCategory,
       directCostCalc,
@@ -633,7 +656,7 @@ export function computeSummary(data: AppData, range: DateRange, pairedExcluded: 
 
   // 일별 추이
   const daily: DailyRow[] = allDays.map((d) => {
-    const row: DailyRow = { date: d, hall: 0, delivery: 0, takeout: 0, total: 0, open: isOpenDay(data, d), unrecorded: excluded.has(d) };
+    const row: DailyRow = { date: d, hall: 0, delivery: 0, takeout: 0, total: 0, open: isOpenDay(data, d), unrecorded: unrecSet.has(d) };
     for (const e of entries) {
       if (e.date !== d) continue;
       const n = netSales(e) ?? 0;
@@ -696,7 +719,6 @@ export function computeSummary(data: AppData, range: DateRange, pairedExcluded: 
     status: { actualAmount, calculatedAmount, estimatedAmount, missingCount: missing.length, missing },
     salesOnClosedDays,
     unrecordedDays: unrecorded,
-    pairedExcluded: paired,
   };
 }
 
@@ -706,10 +728,10 @@ function withBasis(c: Calc, used: number, total: number, unit: CalcBasis['unit']
 }
 
 /** 홀 방문 고객 수·완료 주문 수 표시값 (값이 있는 날만 더한 합계와 기준 일수) */
-export function quantityCalc(cs: ChannelSummary, kind: 'orders' | 'visitors'): Calc {
-  const v = kind === 'visitors' ? cs.visitors : cs.orders;
+export function quantityCalc(cs: ChannelSummary, kind: 'orders' | 'visitors' | 'meals'): Calc {
+  const v = kind === 'visitors' ? cs.visitors : kind === 'meals' ? cs.meals : cs.orders;
   if (v === null) return { value: null, reason: 'noData' };
-  return withBasis({ value: v }, kind === 'visitors' ? cs.visitorsDays : cs.ordersDays, cs.entryDays);
+  return withBasis({ value: v }, kind === 'visitors' ? cs.visitorsDays : kind === 'meals' ? cs.mealsDays : cs.ordersDays, cs.entryDays);
 }
 
 /** "23일 중 22일 기준" · 기록 단위면 "매출 기록 10건 중 8건 확인" (주문 건수가 아님) */
@@ -818,6 +840,8 @@ export function getMetric(s: PeriodSummary, ref: MetricRef): Calc {
     }
     case 'visitors':
       return quantityCalc(s.channels.hall, 'visitors');
+    case 'meals':
+      return quantityCalc(s.channels.hall, 'meals');
     case 'avgTicket':
       if (ch === 'all') return divCalc(s.totalSales, allOrders());
       return s.channels[ch].avgTicket;

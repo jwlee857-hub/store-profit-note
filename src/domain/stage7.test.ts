@@ -8,7 +8,7 @@ import { newSalesEntry, newSolution, registerStoreData } from './factory';
 import { pendingEstimates } from './pending';
 import { scopeToRoute, withChannelFrom } from './review';
 import { generateSample } from './sample';
-import { applyPeriodSettlement, applySettlementEdits, editOf, periodOverlap, settlementTodos, setupHint } from './settlement';
+import { applyPeriodSettlement, applySettlementEdits, editOf, periodOverlap, settlementBreakdown, settlementTodos, setupHint } from './settlement';
 import { SCHEMA_VERSION, type AppData, type SalesEntry } from './types';
 
 const D = '2026-11-20';
@@ -82,7 +82,7 @@ describe('④ 배달앱 정산 반영 — 기간 합계', () => {
     const ov = periodOverlap(d, ps);
     expect(ov.calculated.count).toBe(2);
     expect(ov.dailyActual.count).toBe(0);
-    const r = applyPeriodSettlement(d, ps, 'keepDaily');
+    const r = applyPeriodSettlement(d, ps);
     if ('error' in r) throw new Error(r.error);
     Object.assign(d, r);
     const pc = d.periodCosts.filter((p) => p.routeId === 'route_app_a');
@@ -95,7 +95,7 @@ describe('④ 배달앱 정산 반영 — 기간 합계', () => {
   it('같은 정산서를 다시 저장해도 기간 합계는 한 번만 반영된다', () => {
     const { d } = setup();
     for (let i = 0; i < 2; i++) {
-      const r = applyPeriodSettlement(d, ps, 'keepDaily');
+      const r = applyPeriodSettlement(d, ps);
       if ('error' in r) throw new Error(r.error);
       Object.assign(d, r);
     }
@@ -103,19 +103,15 @@ describe('④ 배달앱 정산 반영 — 기간 합계', () => {
     expect(feeTotal(d)).toBe(50_000);
     expect(periodOverlap(d, ps).replaced).toHaveLength(1); // 저장 전 화면에 '바꿔 넣음'으로 보여줄 기존 합계
   });
-  it('일별 실제액과 겹치면: 그대로 두고 나머지만 반영하거나, 기간 합계로 대체한다 — 어느 쪽이든 합계는 정산서 금액', () => {
+  it('일별 실제액은 기간 합계에 포함된 내역: 합계 금액만 비용에 들어가고 "일별 확인 / 나머지"로 설명한다', () => {
     const { d, ids } = setup();
     d.sales = applySettlementEdits(d, [{ ...editOf(d.sales.find((s) => s.id === ids[0])!), brokerage: 12_000, payment: 3_000 }]);
     expect(periodOverlap(d, ps).dailyActual).toEqual({ count: 1, amount: 15_000 });
-    const keep = applyPeriodSettlement(d, ps, 'keepDaily');
-    if ('error' in keep) throw new Error(keep.error);
-    expect(keep.periodCosts.find((p) => p.routeId)!.amount).toBe(35_000);
-    expect(feeTotal({ ...d, ...keep })).toBe(50_000);
-    const rep = applyPeriodSettlement(d, ps, 'replaceDaily');
-    if ('error' in rep) throw new Error(rep.error);
-    expect(rep.sales.find((s) => s.id === ids[0])!.costs.brokerage.actual).toBeNull();
-    expect(feeTotal({ ...d, ...rep })).toBe(50_000);
-    expect(applyPeriodSettlement(d, { ...ps, amount: 10_000 }, 'keepDaily')).toHaveProperty('error');
+    const r = applyPeriodSettlement(d, ps);
+    if ('error' in r) throw new Error(r.error);
+    Object.assign(d, r);
+    expect(feeTotal(d)).toBe(50_000);
+    expect(settlementBreakdown(d, d.periodCosts.find((p) => p.routeId)!)).toEqual({ total: 50_000, daily: 15_000, dailyCount: 1, rest: 35_000, unverified: false });
   });
   it('기존 백업의 일반 기간 비용(배달앱 지정 없음)은 일별 수수료를 대체하지 않는다', () => {
     const { d } = setup();

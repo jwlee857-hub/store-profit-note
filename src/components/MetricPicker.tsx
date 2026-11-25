@@ -14,7 +14,7 @@ const EASY_SHORT: Partial<Record<MetricKey, string>> = {
 export function validMetricRef(ref: MetricRef): MetricRef {
   const m = METRIC_META[ref.key];
   if (!m.channelScoped) return { ...ref, channel: 'all' };
-  if (ref.key === 'visitors') return { ...ref, channel: 'hall' };
+  if (ref.key === 'visitors' || ref.key === 'meals') return { ...ref, channel: 'hall' };
   if (ref.channel === 'all' && !m.allowAll) return { ...ref, channel: 'hall' };
   return ref;
 }
@@ -23,7 +23,7 @@ export function MetricPicker({ value, onChange, label = '지표' }: { value: Met
   const meta = METRIC_META[value.key];
   const channelOptions = [
     ...(meta.allowAll ? [{ value: 'all' as const, label: '전체' }] : []),
-    ...CHANNELS.filter((c) => value.key !== 'visitors' || c === 'hall').map((c) => ({ value: c, label: CHANNEL_LABEL[c] })),
+    ...CHANNELS.filter((c) => (value.key !== 'visitors' && value.key !== 'meals') || c === 'hall').map((c) => ({ value: c, label: CHANNEL_LABEL[c] })),
   ];
   return (
     <div className="grid grid-cols-2 gap-2">

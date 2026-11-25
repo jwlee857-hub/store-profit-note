@@ -1,5 +1,12 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import type { AppData } from '../domain/types';
+import type { AppData, DateRange } from '../domain/types';
+
+/** 홈에서 고른 조회 기간 (화면 상태, 저장하지 않음). 장사 점검이 같은 기간으로 열린다 */
+export interface ViewPeriod {
+  choice: string;
+  cur: DateRange;
+  prev: DateRange;
+}
 import { clearStorage, loadFromStorage, saveToStorage } from '../storage/storage';
 
 export type PageKey = 'dashboard' | 'store' | 'menus' | 'sales' | 'diagnosis' | 'solutions' | 'performance';
@@ -38,8 +45,15 @@ interface Ctx {
   replaceAll: (d: AppData | null, message?: ToastMessage) => void;
   route: Route;
   navigate: (page: PageKey, params?: Record<string, string>) => void;
+  /**
+   * 화면을 떠나기 전 확인 (예: 정산 표에 저장하지 않은 수정). guard가 true를 돌려주면 이동을 멈추고,
+   * 나중에 proceed()를 부르면 그때 이동한다. null로 해제
+   */
+  setLeaveGuard: (guard: ((proceed: () => void) => boolean) | null) => void;
   toast: (message: ToastMessage, tone?: Toast['tone']) => void;
   confirm: (opts: { title: string; message: string; confirmText?: string; danger?: boolean }) => Promise<boolean>;
+  period: ViewPeriod | null;
+  setPeriod: (p: ViewPeriod) => void;
 }
 
 const AppCtx = createContext<Ctx | null>(null);
@@ -62,6 +76,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [route, setRoute] = useState<Route>(parseHash);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [confirmReq, setConfirmReq] = useState<ConfirmRequest | null>(null);
+  const [period, setPeriod] = useState<ViewPeriod | null>(null);
   const toastId = useRef(0);
 
   useEffect(() => {
@@ -86,7 +101,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
     const place = () => {
       const footer = Array.from(document.querySelectorAll<HTMLElement>('[role="dialog"] .modal-footer')).pop();
       const top = footer?.getBoundingClientRect().top;
-      setToastBottom(top !== undefined && top > 0 ? Math.max(16, Math.round(window.innerHeight - top + 8)) : 16);
+      // 휴대폰에서는 아래 고정 메뉴(높이 56px) 위에 띄운다
+      const base = window.innerWidth < 1024 ? 72 : 16;
+      setToastBottom(top !== undefined && top > 0 ? Math.max(16, Math.round(window.innerHeight - top + 8)) : base);
     };
     place();
     // 알림이 떠 있는 동안 입력 창이 열리거나 닫힐 수 있으므로 위치를 계속 맞춘다 (버튼 줄을 가리지 않게)
@@ -136,11 +153,19 @@ export function AppProvider({ children }: { children: ReactNode }) {
     [persist],
   );
 
+  const leaveGuard = useRef<((proceed: () => void) => boolean) | null>(null);
+  const setLeaveGuard = useCallback((g: ((proceed: () => void) => boolean) | null) => {
+    leaveGuard.current = g;
+  }, []);
   const navigate = useCallback((page: PageKey, params: Record<string, string> = {}) => {
-    const qs = new URLSearchParams(params).toString();
-    setRoute({ page, params });
-    window.location.hash = `/${page}${qs ? `?${qs}` : ''}`;
-    window.scrollTo({ top: 0 });
+    const go = () => {
+      const qs = new URLSearchParams(params).toString();
+      setRoute({ page, params });
+      window.location.hash = `/${page}${qs ? `?${qs}` : ''}`;
+      window.scrollTo({ top: 0 });
+    };
+    if (leaveGuard.current?.(go)) return;
+    go();
   }, []);
 
   const confirm = useCallback(
@@ -151,7 +176,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     [],
   );
 
-  const value: Ctx = { data, loadError, update, replaceAll, route, navigate, toast, confirm };
+  const value: Ctx = { data, loadError, update, replaceAll, route, navigate, setLeaveGuard, toast, confirm, period, setPeriod };
 
   return (
     <AppCtx.Provider value={value}>

@@ -30,10 +30,11 @@ import {
   type FoodCostRate,
   type OrderRoute,
   type PerOrderCost,
-  type StoreSettings,
+  type StoreSettings, type WeekdayHours,
 } from '../domain/types';
 import { useApp, useData } from '../state/AppContext';
-import { DataManagement } from './DataManagement';
+import { BackupNow, DataManagement } from './DataManagement';
+import { appToday } from '../domain/periods';
 
 export function StoreSettingsPage() {
   const { route } = useApp();
@@ -44,11 +45,16 @@ export function StoreSettingsPage() {
   }, [route.params.section]);
   return (
     <>
-      <PageHeader title="가게 설정" description="설정을 바꿔도 이미 저장된 과거 실적은 자동으로 바뀌지 않습니다." />
+      <PageHeader title="설정" description="설정을 바꿔도 이미 저장된 과거 실적은 바뀌지 않아요." />
       <div className="space-y-4">
-        <BasicInfo />
-        <DayOverrides />
-        <div className="grid gap-4 xl:grid-cols-2">
+        <SettingsHome />
+        <div id="store-info" className="scroll-mt-20">
+          <BasicInfo />
+        </div>
+        <div id="store-days" className="scroll-mt-20">
+          <DayOverrides />
+        </div>
+        <div id="store-apps" className="grid scroll-mt-20 gap-4 xl:grid-cols-2">
           <Platforms />
           <PaymentMethods />
         </div>
@@ -57,9 +63,81 @@ export function StoreSettingsPage() {
         <PerOrderCosts />
         <FoodCostRates />
         <CostSettingsInfo />
-        <DataManagement />
+        <div id="backup" className="scroll-mt-20">
+          <DataManagement />
+        </div>
       </div>
     </>
+  );
+}
+
+/** 설정 첫 화면: 네 곳으로 바로 가기 + 다른 설정을 지나지 않고 바로 백업 */
+function SettingsHome() {
+  const { navigate } = useApp();
+  const go = (id: string) => document.getElementById(id)?.scrollIntoView?.({ behavior: 'smooth', block: 'start' });
+  const tiles: [string, string, string][] = [
+    ['store-info', '가게 정보', '이름·판매 방식·영업시간'],
+    ['store-days', '영업일', '임시 휴업·특별 영업'],
+    ['store-apps', '배달앱·비용 기준', '주문 경로·수수료·건당 비용'],
+    ['backup', '백업·복원', '다른 기기로 옮기기'],
+  ];
+  return (
+    <section aria-label="설정 바로 가기" className="space-y-3">
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+        {tiles.map(([id, label, sub]) => (
+          <button key={id} type="button" onClick={() => go(id)} className="rounded-xl bg-white p-3 text-left shadow-sm ring-1 ring-slate-200 hover:bg-slate-50">
+            <div className="font-semibold text-slate-900">{label}</div>
+            <div className="text-xs text-slate-600">{sub}</div>
+          </button>
+        ))}
+      </div>
+      <BackupNow />
+      <button type="button" className="text-sm font-medium text-slate-700 underline" onClick={() => navigate('menus')}>
+        메뉴와 원가 관리
+      </button>
+    </section>
+  );
+}
+
+/** 요일별 영업시간 예외 (예: 토요일만 11:00~13:00). 공통 영업시간이 기본이고, 예외가 있는 요일만 따로 기록한다 */
+function WeekdayHoursEdit({ value, openDays, base, error, onChange }: { value: WeekdayHours[]; openDays: number[]; base: { openTime: string; closeTime: string }; error?: string; onChange: (v: WeekdayHours[]) => void }) {
+  const free = [1, 2, 3, 4, 5, 6, 0].filter((d) => openDays.includes(d) && !value.some((h) => h.day === d));
+  const patch = (day: number, p: Partial<WeekdayHours>) => onChange(value.map((h) => (h.day === day ? { ...h, ...p } : h)));
+  return (
+    <div className="md:col-span-2">
+      <p className="mb-1 text-xs font-medium text-slate-700">요일별 영업시간 예외 (선택)</p>
+      {value.length > 0 && (
+        <ul className="mb-2 space-y-2">
+          {[...value]
+            .sort((a, b) => ((a.day + 6) % 7) - ((b.day + 6) % 7))
+            .map((h) => (
+              <li key={h.day} aria-label={`${WEEKDAY_LABELS[h.day]}요일 영업시간`} className="flex flex-wrap items-center gap-2">
+                <span className="w-16 text-sm font-medium">{WEEKDAY_LABELS[h.day]}요일만</span>
+                <input type="time" aria-label={`${WEEKDAY_LABELS[h.day]}요일 영업 시작`} className="rounded-lg border border-slate-300 px-2 py-1.5 text-sm" value={h.openTime} onChange={(e) => patch(h.day, { openTime: e.target.value })} />
+                <span>~</span>
+                <input type="time" aria-label={`${WEEKDAY_LABELS[h.day]}요일 영업 종료`} className="rounded-lg border border-slate-300 px-2 py-1.5 text-sm" value={h.closeTime} onChange={(e) => patch(h.day, { closeTime: e.target.value })} />
+                <Button size="sm" variant="ghost" onClick={() => onChange(value.filter((x) => x.day !== h.day))}>
+                  예외 삭제
+                </Button>
+              </li>
+            ))}
+        </ul>
+      )}
+      {free.length > 0 && (
+        <div className="flex flex-wrap items-center gap-1.5">
+          <span className="text-xs text-slate-600">예외 추가:</span>
+          {free.map((d) => (
+            <Button key={d} size="sm" onClick={() => onChange([...value, { day: d, ...base }])}>
+              {WEEKDAY_LABELS[d]}
+            </Button>
+          ))}
+        </div>
+      )}
+      {error && <p className="mt-1 text-xs text-red-700">{error}</p>}
+      <p className="mt-1 text-xs text-slate-500">
+        다른 요일은 공통 영업시간({base.openTime}~{base.closeTime})을 써요. 기록용이며 매출·비용 계산은 바꾸지 않아요. 계획을 그 요일끼리 비교하려면 실행 계획의 ‘적용 요일’을 고르세요.
+      </p>
+    </div>
   );
 }
 
@@ -77,6 +155,7 @@ function BasicInfo() {
     if (!draft.channels.length) e.channels = '판매 방식을 하나 이상 선택하세요.';
     if (draft.seats !== null && (!Number.isInteger(draft.seats) || draft.seats < 0)) e.seats = '좌석 수는 0 이상의 정수입니다.';
     if (!/^\d{2}:\d{2}$/.test(draft.openTime) || !/^\d{2}:\d{2}$/.test(draft.closeTime)) e.time = '영업시간을 입력하세요.';
+    if ((draft.weekdayHours ?? []).some((h) => !/^\d{2}:\d{2}$/.test(h.openTime) || !/^\d{2}:\d{2}$/.test(h.closeTime))) e.weekdayHours = '요일별 예외의 영업시간을 입력하세요.';
     setErr(e);
     if (Object.keys(e).length) return;
     update((d) => ({ ...d, store: { ...draft, name: draft.name.trim() } }), '가게 기본 정보를 저장했습니다.');
@@ -122,6 +201,7 @@ function BasicInfo() {
             </div>
           )}
         </Field>
+        <WeekdayHoursEdit value={draft.weekdayHours ?? []} openDays={draft.regularOpenDays} base={{ openTime: draft.openTime, closeTime: draft.closeTime }} error={err.weekdayHours} onChange={(v) => set('weekdayHours', v.length ? v : undefined)} />
         <Field label="입력 금액의 부가세 기준" hint="베타 계산에서는 모든 매출·비용 입력의 부가세 포함 여부를 이 기준으로 동일하게 맞춰 입력하세요. 세무 신고용 계산이 아닙니다.">
           {(id) => (
             <Select
@@ -366,6 +446,7 @@ function Routes() {
     if (!editing.channels.length) e.channels = '판매 방식을 하나 이상 선택하세요.';
     const removed = data.routes.find((r) => r.id === editing.id)?.channels.filter((c) => !editing.channels.includes(c)) ?? [];
     if (removed.some((c) => data.sales.some((s) => s.routeId === editing.id && s.channel === c))) e.channels = '이미 이 경로로 입력된 판매 방식은 해제할 수 없습니다.';
+    if (editing.activeFrom && editing.activeTo && editing.activeFrom > editing.activeTo) e.active = '사용 종료일이 시작일보다 빠릅니다.';
     setErr(e);
     if (Object.keys(e).length) return;
     const exists = data.routes.some((r) => r.id === editing.id);
@@ -380,7 +461,7 @@ function Routes() {
       title="주문 경로"
       subtitle="주문이 들어온 경로입니다(매장 방문, 전화, 배달앱 등). 매출은 날짜·판매 방식·주문 경로별로 입력합니다."
       actions={
-        <Button variant="primary" onClick={() => (setErr({}), setEditing({ id: uid('route'), name: '', channels: [], platformId: null }))}>
+        <Button variant="primary" onClick={() => (setErr({}), setEditing({ id: uid('route'), name: '', channels: [], platformId: null, activeFrom: appToday(data), activeTo: null }))}>
           경로 추가
         </Button>
       }
@@ -394,6 +475,7 @@ function Routes() {
               <th className={th}>이름</th>
               <th className={th}>판매 방식</th>
               <th className={th}>플랫폼</th>
+              <th className={th}>사용 기간</th>
               <th className={th}>매출 입력</th>
               <th className={th}></th>
             </tr>
@@ -404,6 +486,7 @@ function Routes() {
                 <td className={td}>{r.name}</td>
                 <td className={td}>{r.channels.map((c) => CHANNEL_LABEL[c]).join(', ')}</td>
                 <td className={td}>{data.platforms.find((p) => p.id === r.platformId)?.name ?? '없음'}</td>
+                <td className={td}>{r.activeFrom || r.activeTo ? `${r.activeFrom ?? '처음'} ~ ${r.activeTo ?? '사용 중'}` : '전체 기간'}</td>
                 <td className={td}>{data.sales.filter((s) => s.routeId === r.id).length}건</td>
                 <td className={td}>
                   <div className="flex gap-1">
@@ -458,6 +541,14 @@ function Routes() {
                 ))}
               </div>
               {err.channels && <p className="mt-1 text-xs text-red-700">{err.channels}</p>}
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <Field label="사용 시작일" hint="이 날 전에는 이 경로 매출이 없어도 미입력으로 세지 않아요. 비우면 처음부터." error={err.active}>
+                {(id) => <DateInput id={id} value={editing.activeFrom ?? null} onChange={(v) => setEditing({ ...editing, activeFrom: v || null })} />}
+              </Field>
+              <Field label="사용 종료일" hint="더 이상 쓰지 않으면 마지막 날을 넣으세요. 지난 기록과 실적은 그대로예요.">
+                {(id) => <DateInput id={id} value={editing.activeTo ?? null} onChange={(v) => setEditing({ ...editing, activeTo: v || null })} />}
+              </Field>
             </div>
             <Field label="플랫폼" hint="배달앱 등 중개 플랫폼을 거치는 경로라면 선택하세요. 선택하면 중개 수수료가 필수 비용 항목이 됩니다.">
               {(id) => (
@@ -719,7 +810,7 @@ function PerOrderCosts() {
       }
     >
       <p className="mb-3 text-sm text-slate-700">
-        예: 홀 소모품비, 가게 부담 순배달비, 포장비. 기록에 실제 금액을 입력하면 그 금액만 씁니다. 값을 바꿔도 이미 저장된 기록은 그대로입니다. 한 달 청구서로 아는 비용은 ‘월세·급여 등 기간별 비용’에 넣어도 됩니다.
+        예: 홀 소모품비, 가게 부담 순배달비, 포장비. 기록에 실제 금액을 입력하면 그 금액만 씁니다. 값을 바꿔도 이미 저장된 기록은 그대로입니다. 한 달 청구서로 아는 비용은 ‘기록 › 비용 기록’에 넣어도 됩니다.
       </p>
       {!sorted.length ? (
         <p className="text-sm text-slate-600">아직 없습니다. 정해 두지 않은 항목은 빠른 입력 때 빈칸(미입력)으로 남고, 홈의 영업이익에 ‘미확정’ 표시가 붙습니다.</p>
@@ -936,7 +1027,7 @@ function CostSettingsInfo() {
         </div>
       </div>
       <div className="mt-3">
-        <Button onClick={() => navigate('sales', { tab: 'period' })}>월세·급여 등 기간별 비용 입력으로 이동</Button>
+        <Button onClick={() => navigate('sales', { tab: 'period' })}>비용 기록(월세·급여 등)으로 이동</Button>
       </div>
     </Card>
   );

@@ -100,6 +100,9 @@ function safeStorage(): Storage | undefined {
 
 const isObj = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
 const isNumOrNull = (v: unknown) => v === null || (typeof v === 'number' && Number.isFinite(v));
+const isWeekday = (v: unknown) => Number.isInteger(v) && (v as number) >= 0 && (v as number) <= 6;
+/** 적용 요일: 없음·null·요일 숫자 목록 */
+const weekdaysOk = (v: unknown) => v === undefined || v === null || (Array.isArray(v) && v.every(isWeekday));
 const isStr = (v: unknown) => typeof v === 'string';
 
 const COLLECTIONS = [
@@ -238,6 +241,37 @@ export function migrate(data: unknown, version: number): unknown {
     };
     v = 8;
   }
+  if (v < 9) {
+    // v8 → v9: 배달앱 정산서 기간 합계(경로 지정 기간 비용)에 저장 방식(settlementBasis)을 붙인다.
+    // 이전 버전은 '일별 실제액은 그대로 두고 나머지(잔여액)만' 저장할 수 있었고, 현재는 총액을 저장한다.
+    // - 메모에 정산서 총액이 적힌 이전 형식 → 총액으로 바꾼다 (일별 실제액은 그 안의 내역)
+    // - 현재 형식 메모 → 그대로 총액
+    // - 그 밖: 그 기간에 일별 실제 수수료가 없으면 두 해석이 같으므로 총액, 있으면 원본을 보존하고 확인 필요(unverified)
+    const sales = Array.isArray(d.sales) ? (d.sales as Record<string, unknown>[]) : [];
+    const dailyActual = (pc: Record<string, unknown>) =>
+      sales
+        .filter((e) => isObj(e) && e.routeId === pc.routeId && e.channel === pc.attribution && isStr(e.date) && (e.date as string) >= (pc.start as string) && (e.date as string) <= (pc.end as string))
+        .reduce((t, e) => {
+          const costs = isObj(e.costs) ? e.costs : {};
+          const v = (c: string) => (isObj(costs[c]) && typeof (costs[c] as Record<string, unknown>).actual === 'number' ? ((costs[c] as Record<string, unknown>).actual as number) : 0);
+          return t + v('brokerage') + (e.bundledFee ? 0 : v('payment'));
+        }, 0);
+    d = {
+      ...d,
+      schemaVersion: 9,
+      periodCosts: Array.isArray(d.periodCosts)
+        ? d.periodCosts.map((pc) => {
+            if (!isObj(pc) || !isStr(pc.routeId) || pc.settlementBasis) return pc;
+            const memo = isStr(pc.memo) ? pc.memo : '';
+            const legacy = /^배달앱 정산서 기간 합계 ([\d,]+)원 \(중개·결제 수수료\)/.exec(memo);
+            if (legacy) return { ...pc, amount: Number(legacy[1].replace(/,/g, '')), settlementBasis: 'total' };
+            if (memo === '배달앱 정산서 기간 합계 (중개·결제 수수료)' || dailyActual(pc) === 0) return { ...pc, settlementBasis: 'total' };
+            return { ...pc, settlementBasis: 'unverified' };
+          })
+        : d.periodCosts,
+    };
+    v = 9;
+  }
   return d;
 }
 
@@ -252,6 +286,9 @@ export function validateData(d: unknown): string | null {
       return '가게 설정 형식이 올바르지 않습니다.';
     if (!(s.channels as unknown[]).every((c) => CHANNELS.includes(c as never))) return '가게 판매 방식 값이 올바르지 않습니다.';
     if (!Array.isArray(s.commonCostChecklist)) return '공통비 체크리스트 형식이 올바르지 않습니다.';
+    // v9 안에서 더한 선택 항목: 없으면 이전 데이터 그대로
+    if (s.weekdayHours !== undefined && !(Array.isArray(s.weekdayHours) && s.weekdayHours.every((h) => isObj(h) && isWeekday(h.day) && isStr(h.openTime) && isStr(h.closeTime))))
+      return '요일별 영업시간 형식이 올바르지 않습니다.';
   }
   const sales = d.sales as unknown[];
   for (let i = 0; i < sales.length; i++) {
@@ -259,7 +296,7 @@ export function validateData(d: unknown): string | null {
     if (!isObj(e)) return `매출 ${i + 1}번째 항목 형식 오류`;
     if (!isValidDate(e.date)) return `매출 ${i + 1}번째 항목의 날짜 오류`;
     if (!CHANNELS.includes(e.channel as never)) return `매출 ${i + 1}번째 항목의 판매 방식 오류`;
-    if (!isNumOrNull(e.orders) || !isNumOrNull(e.gross) || !isNumOrNull(e.storeDiscount) || !isNumOrNull(e.refund) || !isNumOrNull(e.visitors) || !isNumOrNull(e.netInput) || !isNumOrNull(e.cardSales))
+    if (!isNumOrNull(e.orders) || !isNumOrNull(e.gross) || !isNumOrNull(e.storeDiscount) || !isNumOrNull(e.refund) || !isNumOrNull(e.visitors) || !isNumOrNull(e.netInput) || !isNumOrNull(e.cardSales) || (e.meals !== undefined && !isNumOrNull(e.meals)))
       return `매출 ${i + 1}번째 항목의 숫자 값 오류`;
     if (e.amountMode !== 'gross' && e.amountMode !== 'net') return `매출 ${i + 1}번째 항목의 금액 기준 오류`;
     if (!isObj(e.costs)) return `매출 ${i + 1}번째 항목의 비용 형식 오류`;
@@ -283,6 +320,7 @@ export function validateData(d: unknown): string | null {
   }
   for (const p of d.problems as unknown[]) {
     if (!isObj(p) || !isStr(p.name) || !isObj(p.analysis) || !isObj(p.compare) || !isObj(p.target)) return '문제 항목 형식 오류';
+    if (!weekdaysOk(p.weekdays)) return `문제 "${p.name}"의 적용 요일 형식 오류`;
   }
   for (const s of d.solutions as unknown[]) {
     if (!isObj(s) || !isStr(s.name) || !isObj(s.review) || !isObj(s.kpi)) return '실행 계획 항목 형식 오류';
@@ -291,6 +329,9 @@ export function validateData(d: unknown): string | null {
     if (!isObj(s.coupon) || !isNumOrNull(s.coupon.amount) || !isNumOrNull(s.coupon.minOrder) || !isNumOrNull(s.coupon.previousAmount) || !isNumOrNull(s.coupon.usedCount) || !(s.coupon.routeId === null || isStr(s.coupon.routeId)))
       return `실행 계획 "${s.name}"의 쿠폰 조건 형식 오류`;
     if (!isNumOrNull((s.review as Record<string, unknown>).nextCouponAmount)) return `실행 계획 "${s.name}"의 다음 쿠폰 금액 형식 오류`;
+    const dec = (s.review as Record<string, unknown>).decision;
+    if (!(dec === null || dec === undefined || ['keep', 'revise', 'stop', 'hold'].includes(dec as string))) return `실행 계획 "${s.name}"의 판단 값 오류`;
+    if (!weekdaysOk(s.weekdays)) return `실행 계획 "${s.name}"의 적용 요일 형식 오류`;
   }
   if (!Array.isArray(d.perOrderCosts)) return '주문 1건당 기본 비용 형식 오류';
   for (const c of d.perOrderCosts as unknown[]) {

@@ -1,4 +1,4 @@
-import { daysInclusive, formatRange, isValidRange, previousRange } from '../domain/dates';
+import { daysInclusive, dotRange, formatRange, isFullMonth, isValidRange, previousMonth, previousRange } from '../domain/dates';
 import { rangesEndingAt, recentRanges, referenceDate } from '../domain/periods';
 import type { AppData, DateRange } from '../domain/types';
 import { Button } from './ui';
@@ -66,12 +66,13 @@ export function PeriodPicker({
           <Button size="sm" onClick={() => preset(28)}>
             최근 28일
           </Button>
-          <Button
-            size="sm"
-            onClick={() => isValidRange(cur) && onChange(cur, previousRange(cur))}
-            title="조회 기간과 같은 길이의 직전 기간"
-          >
-            비교 = 직전 같은 기간
+          {isFullMonth(cur) && (
+            <Button size="sm" onClick={() => onChange(cur, previousMonth(cur))} title="조회한 달의 지난달 1일~말일">
+              비교 = 지난달 전체 ({dotRange(previousMonth(cur))})
+            </Button>
+          )}
+          <Button size="sm" onClick={() => isValidRange(cur) && onChange(cur, previousRange(cur))} title="조회 기간과 같은 일수의 바로 앞 기간">
+            비교 = 직전 같은 일수{isValidRange(cur) ? ` (${dotRange(previousRange(cur))})` : ''}
           </Button>
         </div>
       </div>
@@ -80,6 +81,16 @@ export function PeriodPicker({
         {isValidRange(cur) && isValidRange(prev) && ` 조회 ${formatRange(cur)} / 비교 ${formatRange(prev)}`}
       </p>
       {overlap && <p className="mt-1 text-xs text-amber-700">조회 기간과 비교 기간이 겹칩니다.</p>}
+      {isValidRange(cur) && isValidRange(prev) && daysInclusive(cur.start, cur.end) !== daysInclusive(prev.start, prev.end) && !(isFullMonth(cur) && isFullMonth(prev)) && (
+        <p className="mt-2 flex flex-wrap items-center gap-2 rounded-md bg-amber-50 px-2 py-1.5 text-sm text-amber-900 ring-1 ring-amber-200">
+          <span>
+            ⚠ 조회 기간({daysInclusive(cur.start, cur.end)}일)과 비교 기간({daysInclusive(prev.start, prev.end)}일)의 길이가 달라요. 총액 대신 영업일당으로 비교합니다.
+          </span>
+          <Button size="sm" onClick={() => onChange(cur, previousRange(cur))}>
+            같은 길이로 맞추기
+          </Button>
+        </p>
+      )}
     </div>
   );
 }

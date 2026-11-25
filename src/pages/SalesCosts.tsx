@@ -1,7 +1,7 @@
 import { useId, useMemo, useState } from 'react';
 import { EntryStatusBadge, QuickEntry, TodayStatus, type QuickEntryProps } from '../components/QuickEntry';
 import { Settlement } from './Settlement';
-import { recentRanges } from '../domain/periods';
+import { appToday, recentRanges } from '../domain/periods';
 import { pendingEntries } from '../domain/pending';
 import { copyFromPrevMonth, isMonthKey, monthCosts, monthLabel, monthOf, monthRangeOf, monthShort, rowChanged, shiftMonth, wonShort, type MonthKey } from '../domain/months';
 import {
@@ -65,23 +65,27 @@ import { useApp, useData } from '../state/AppContext';
 type Tab = 'daily' | 'settle' | 'period' | 'customers';
 
 export function SalesCosts() {
-  const { route, navigate } = useApp();
-  const tab = (['daily', 'settle', 'period', 'customers'] as Tab[]).includes(route.params.tab as Tab) ? (route.params.tab as Tab) : 'daily';
+  const { route, navigate, data: appData } = useApp();
+  // 배달을 운영하지 않고 배달앱 경로도 없는 매장(예: 홀만)은 정산 탭을 숨긴다
+  const hasApps = !!appData?.store?.channels.includes('delivery') || !!appData?.routes.some((r) => r.platformId);
+  // 고객 지표는 선택 기능이라 탭에 두지 않고 문제 진단에서 연결한다 (주소 ?tab=customers는 그대로 열림)
+  const tabs: Tab[] = hasApps ? ['daily', 'period', 'settle', 'customers'] : ['daily', 'period', 'customers'];
+  const tab = tabs.includes(route.params.tab as Tab) ? (route.params.tab as Tab) : 'daily';
   // 선택한 달은 주소(?month=2026-11)에 남겨 새로고침해도 유지. 처음 열면 이번 달
-  const month: MonthKey = isMonthKey(route.params.month) ? route.params.month : monthOf(todayStr());
+  const month: MonthKey = isMonthKey(route.params.month) ? route.params.month : monthOf(appToday(appData));
   const setMonth = (m: MonthKey) => navigate('sales', { tab, month: m });
   return (
     <>
-      <PageHeader title="매출과 비용" description="매출을 먼저 기록하고, 비용은 알게 될 때 보완하세요." />
+      <PageHeader title="기록" description="매출을 먼저 적고, 비용은 알게 될 때 채워요." />
       <div className="mb-4">
         <ToggleGroup
           value={tab}
           onChange={(t) => navigate('sales', isMonthKey(route.params.month) ? { tab: t, month: route.params.month } : { tab: t })}
           options={[
-            { value: 'daily', label: '일별 매출' },
-            { value: 'settle', label: '배달앱 정산 반영' },
-            { value: 'period', label: '월세·급여 등 기간별 비용' },
-            { value: 'customers', label: '고객 지표 (선택)' },
+            { value: 'daily', label: '매출 기록' },
+            { value: 'period', label: '비용 기록' },
+            ...(hasApps ? [{ value: 'settle' as const, label: '정산서 반영' }] : []),
+            ...(tab === 'customers' ? [{ value: 'customers' as const, label: '고객 지표 (선택)' }] : []),
           ]}
         />
       </div>
@@ -95,7 +99,7 @@ export function SalesCosts() {
 
 /** ◀ 2026년 11월 ▶ (일별 매출·기간별 비용 공통) */
 function MonthNav({ month, onChange }: { month: MonthKey; onChange: (m: MonthKey) => void }) {
-  const thisMonth = monthOf(todayStr());
+  const thisMonth = monthOf(appToday(useApp().data));
   const arrow = 'flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-lg text-slate-800 ring-1 ring-slate-200 hover:bg-slate-100';
   return (
     <nav aria-label="월 선택" className="flex items-center justify-between gap-2 rounded-xl bg-white p-2 shadow-sm ring-1 ring-slate-200">
@@ -135,7 +139,7 @@ function DailySales({ month, onMonth }: { month: MonthKey; onMonth: (m: MonthKey
     const ch = CHANNELS.includes(p.channel as Channel) ? (p.channel as Channel) : undefined;
     return { onClose: () => undefined, ...(isValidDate(p.date ?? '') ? { date: p.date } : {}), ...(ch ? { channel: ch } : {}), ...(ch && p.route ? { routeId: p.route } : {}) };
   });
-  const [statusDate, setStatusDate] = useState(todayStr());
+  const [statusDate, setStatusDate] = useState(appToday(data));
   // 보여줄 날짜 수는 달마다 7일부터 시작
   const [shown, setShown] = useState({ month, n: 7 });
   const shownDays = shown.month === month ? shown.n : 7;
@@ -198,7 +202,7 @@ function DailySales({ month, onMonth }: { month: MonthKey; onMonth: (m: MonthKey
           onClick={() => {
             const ch = (data.prefs.lastEntry?.channel ?? data.store?.channels[0] ?? 'hall') as Channel;
             const rid = data.prefs.lastEntry?.routeId ?? data.routes.find((r) => r.channels.includes(ch))?.id ?? '';
-            setEditing(newSalesEntry({ channel: ch, routeId: rid, date: todayStr(), amountMode: 'net' }));
+            setEditing(newSalesEntry({ channel: ch, routeId: rid, date: appToday(data), amountMode: 'net' }));
           }}
         >
           상세 입력 (결제수단·비용 포함)
@@ -395,7 +399,7 @@ export function SalesEditor({ initial, onClose, onSaved }: { initial: SalesEntry
     setTouched(true);
     if (hasErrors(v)) return;
     // 자동 계산값은 화면에 보이는 그대로(현재 입력값 기준) 저장한다. 실제 금액(정산 확인액)은 그대로
-    const clean: SalesEntry = { ...e, visitors: e.channel === 'hall' ? e.visitors : null };
+    const clean: SalesEntry = { ...e, visitors: e.channel === 'hall' ? e.visitors : null, ...(e.meals !== undefined ? { meals: e.channel === 'hall' ? e.meals : null } : {}) }; // 식수 칸이 없던 이전 기록은 그대로
     const note =
       !isNew && recalc
         ? [recalc.updated.length ? `자동 계산 갱신: ${recalc.updated.join('·')}` : '', recalc.removed.length ? `근거가 없어 지운 계산값: ${recalc.removed.join('·')}` : ''].filter(Boolean).join(' · ')
@@ -480,6 +484,7 @@ export function SalesEditor({ initial, onClose, onSaved }: { initial: SalesEntry
                 if (f.net !== form.net) setApplied(null);
               }}
               label="매출 금액"
+              delivery={e.channel === 'delivery'}
               error={showErr('netInput') ?? showErr('gross')}
               warning={v.warnings.netInput ?? v.warnings.gross}
               initial={isNew ? undefined : initForm}
@@ -518,6 +523,11 @@ export function SalesEditor({ initial, onClose, onSaved }: { initial: SalesEntry
                 {(id) => <NumberInput id={id} value={e.visitors} onChange={(x) => set('visitors', x)} suffix="명" invalid={!!showErr('visitors')} />}
               </Field>
             )}
+            {e.channel === 'hall' && (
+              <Field label="제공 식수" error={showErr('meals')} hint="선택 · 비우면 미입력">
+                {(id) => <NumberInput id={id} value={e.meals ?? null} onChange={(x) => set('meals', x)} suffix="끼" invalid={!!showErr('meals')} />}
+              </Field>
+            )}
           </div>
           {(showErr('storeDiscount') || showErr('refund')) && <p className="mt-1 text-sm text-red-700">⛔ {showErr('storeDiscount') ?? showErr('refund')}</p>}
         </section>
@@ -534,7 +544,7 @@ export function SalesEditor({ initial, onClose, onSaved }: { initial: SalesEntry
               <li>추정 · 근거 불분명: 이전에 저장된 값 중 어떻게 구했는지 기록이 없는 값입니다.</li>
               <li>가게 부담 순배달비 = 가게가 지급한 배달비 − 가게에 귀속되는 고객 부담 배달비 (고객 부담 배달비를 매출에 다시 더하지 않습니다)</li>
               <li>묶음 수수료는 중개 수수료 칸에 합친 금액을 넣고, 결제 수수료는 따로 넣지 않습니다.</li>
-              <li>월세·급여처럼 기간에 걸친 비용은 ‘월세·급여 등 기간별 비용’ 탭에서 입력합니다.</li>
+              <li>월세·급여처럼 기간에 걸친 비용은 ‘비용 기록’ 탭에서 입력합니다.</li>
             </ul>
           </More>
           <div className="mb-3 flex flex-wrap items-center gap-2 text-sm text-slate-700">

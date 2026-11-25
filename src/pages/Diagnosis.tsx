@@ -1,6 +1,11 @@
 import { useMemo, useState } from 'react';
+import { CheckSteps } from '../components/CheckSteps';
+import { ImpactDetail, NeedMoreRecords } from '../components/ChangeFocus';
+import { gapTarget } from '../components/RecordGaps';
+import { recordGaps } from '../domain/review';
 import { MetricPicker } from '../components/MetricPicker';
-import { presetRanges, referenceDate } from '../domain/periods';
+import { WeekdayPicker } from '../components/WeekdayPicker';
+import { appToday, periodWords, presetRanges, referenceDate } from '../domain/periods';
 import {
   Badge,
   Button,
@@ -26,14 +31,14 @@ import {
 } from '../components/ui';
 import { GAP_NOTE, channelSalesCalc, compareValues, expectedProfitChange } from '../domain/calc';
 import { RecordGapsNotice } from '../components/RecordGaps';
-import { WEEKDAY_LABELS, formatRange, isValidRange, previousRange, todayStr } from '../domain/dates';
+import { WEEKDAY_LABELS, formatRange, isValidRange, previousRange } from '../domain/dates';
 import { ImpactNote, ImpactTag, RelatedCauses } from '../components/RelatedCauses';
 import { DiscountEfficiencyNote } from '../components/DiscountEfficiency';
 import { discountRow } from '../domain/discount';
-import { ASSESSMENT_LABEL, byImpact, diagnose, quantityPriceText, rangesOverlapNote, topIssues, type DiagnosisResult, type Finding } from '../domain/diagnosis';
+import { ASSESSMENT_LABEL, byImpact, diagnose, plainFact, quantityPriceText, rangesOverlapNote, topIssues, type DiagnosisResult, type Finding } from '../domain/diagnosis';
 import { newProblem } from '../domain/factory';
-import { fmt, fmtPp, fmtSigned, josa } from '../domain/format';
-import { CHANNEL_COLOR, CHANNEL_LABEL, METRIC_META, PROBLEM_TYPE_LABEL, STATUS_LABEL } from '../domain/labels';
+import { fmt, fmtPp, fmtSigned, josa, weekdaysText } from '../domain/format';
+import { CHANNEL_COLOR, CHANNEL_LABEL, METRIC_META, PROBLEM_TYPE_LABEL, STATUS_LABEL, resultLabel } from '../domain/labels';
 import { templateForFinding } from '../domain/templates';
 import { CHANNELS, type Calc, type Problem, type Solution } from '../domain/types';
 import { useApp, useData } from '../state/AppContext';
@@ -42,26 +47,38 @@ export function Diagnosis() {
   const data = useData();
   const { route, navigate, update, confirm } = useApp();
   const [editing, setEditing] = useState<Problem | null>(null);
-  const selected = data.problems.find((p) => p.id === route.params.problem) ?? data.problems[0] ?? null;
+  // 홈 '자세히 보기': 기간만 받아 저장하지 않은 미리 보기로 연다 (같은 기간의 저장한 점검이 있으면 그것을 연다)
+  const q = route.params;
+  const draftRanges = !q.problem && q.from && q.to && q.cfrom && q.cto ? { analysis: { start: q.from, end: q.to }, compare: { start: q.cfrom, end: q.cto } } : null;
+  const savedSame = draftRanges ? data.problems.find((x) => x.analysis.start === q.from && x.analysis.end === q.to && x.compare.start === q.cfrom && x.compare.end === q.cto && x.channel === 'all') : undefined;
+  const draft = useMemo(
+    () =>
+      draftRanges && !savedSame && isValidRange(draftRanges.analysis) && isValidRange(draftRanges.compare)
+        ? newProblem({ name: `${formatRange(draftRanges.analysis)} 영업이익 점검`, type: 'profitDecline', ...draftRanges, channel: 'all', target: { key: 'operatingProfit', channel: 'all' } })
+        : null,
+    [q.from, q.to, q.cfrom, q.cto, !!savedSame], // eslint-disable-line react-hooks/exhaustive-deps
+  );
+  const selected = draft ?? savedSame ?? data.problems.find((p) => p.id === q.problem) ?? data.problems[0] ?? null;
 
   // 새 문제의 기본 기간은 홈 '최근 4주'와 같은 함수로 계산한다
   const create = () => {
-    const r = presetRanges('recent28', todayStr(), referenceDate(data));
+    const r = presetRanges('recent28', appToday(data), referenceDate(data));
     setEditing(newProblem({ analysis: r.cur, compare: r.prev }));
   };
 
   return (
     <>
+      <CheckSteps current="diagnosis" problemId={selected && selected !== draft ? selected.id : null} solutionId={selected ? data.solutions.find((s) => s.problemId === selected.id)?.id : null} />
       <PageHeader
         title="문제 진단"
-        description="입력된 숫자로 규칙에 따라 변화를 분해합니다. 관찰 사실과 확인할 가설을 구분해서 보여주며, 원인을 단정하지 않습니다."
+        description="입력된 숫자로 변화를 나눠 봅니다. 원인을 단정하지 않아요."
         actions={
           <Button variant="primary" onClick={create}>
             문제 등록
           </Button>
         }
       />
-      {!data.problems.length ? (
+      {!data.problems.length && !draft ? (
         <EmptyState
           title="등록된 문제가 없습니다"
           description="예: '최근 4주 홀 매출 감소', '배달은 늘었는데 이익이 줄었다'처럼 확인하고 싶은 변화를 분석 기간·비교 기간과 함께 등록하세요."
@@ -73,24 +90,11 @@ export function Diagnosis() {
         />
       ) : (
         <div className="grid gap-4 lg:grid-cols-[16rem_1fr]">
-          <div className="space-y-2">
-            {data.problems.map((p) => (
-              <button
-                key={p.id}
-                onClick={() => navigate('diagnosis', { problem: p.id })}
-                className={`w-full rounded-xl p-3 text-left ring-1 ${selected?.id === p.id ? 'bg-slate-900 text-white ring-slate-900' : 'bg-white ring-slate-200 hover:bg-slate-50'}`}
-              >
-                <div className="text-sm font-medium">{p.name}</div>
-                <div className={`mt-0.5 text-xs ${selected?.id === p.id ? 'text-slate-300' : 'text-slate-500'}`}>
-                  {PROBLEM_TYPE_LABEL[p.type]} · {p.channel === 'all' ? '전체' : CHANNEL_LABEL[p.channel]} · 실행 계획 {data.solutions.filter((s) => s.problemId === p.id).length}개
-                </div>
-              </button>
-            ))}
-          </div>
           {selected && (
             <ProblemView
               key={selected.id}
               problem={selected}
+              draft={selected === draft}
               onEdit={() => setEditing({ ...selected })}
               onDelete={async () => {
                 const linked = data.solutions.filter((s) => s.problemId === selected.id).length;
@@ -110,6 +114,21 @@ export function Diagnosis() {
               }}
             />
           )}
+          {/* 저장한 점검 목록: 휴대폰에서는 지금 볼 변화 아래, 넓은 화면에서는 왼쪽 칸 */}
+          <div className="space-y-2 lg:order-first">
+            {data.problems.map((p) => (
+              <button
+                key={p.id}
+                onClick={() => navigate('diagnosis', { problem: p.id })}
+                className={`w-full rounded-xl p-3 text-left ring-1 ${selected?.id === p.id ? 'bg-slate-900 text-white ring-slate-900' : 'bg-white ring-slate-200 hover:bg-slate-50'}`}
+              >
+                <div className="text-sm font-medium">{p.name}</div>
+                <div className={`mt-0.5 text-xs ${selected?.id === p.id ? 'text-slate-300' : 'text-slate-500'}`}>
+                  {PROBLEM_TYPE_LABEL[p.type]} · {p.channel === 'all' ? '전체' : CHANNEL_LABEL[p.channel]} · 실행 계획 {data.solutions.filter((s) => s.problemId === p.id).length}개
+                </div>
+              </button>
+            ))}
+          </div>
         </div>
       )}
       {editing && <ProblemEditor initial={editing} onClose={() => setEditing(null)} />}
@@ -133,6 +152,11 @@ function ProblemEditor({ initial, onClose }: { initial: Problem; onClose: () => 
   }
   const show = (k: string) => (touched ? errs[k] : undefined);
   const unit = METRIC_META[p.target.key].unit;
+  // 비교 기간을 따로 바꾸지 않았으면(직전 같은 길이) 분석 기간을 따라 움직인다
+  const setAnalysis = (r: Problem['analysis']) => {
+    const follow = isValidRange(p.analysis) && JSON.stringify(p.compare) === JSON.stringify(previousRange(p.analysis));
+    setP({ ...p, analysis: r, compare: follow && isValidRange(r) ? previousRange(r) : p.compare });
+  };
 
   const save = () => {
     setTouched(true);
@@ -157,89 +181,112 @@ function ProblemEditor({ initial, onClose }: { initial: Problem; onClose: () => 
       }
     >
       <div className="grid gap-3 sm:grid-cols-2">
-        <Field label="문제명" required error={show('name')} className="sm:col-span-2">
+        <Field label="무엇을 점검할까요?" required error={show('name')} className="sm:col-span-2">
           {(id) => <TextInput id={id} value={p.name} onChange={(v) => setP({ ...p, name: v })} placeholder="예: 최근 4주 홀 매출 감소" />}
         </Field>
-        <Field label="유형">
-          {(id) => (
-            <Select
-              id={id}
-              value={p.type}
-              onChange={(v) => setP({ ...p, type: v })}
-              options={[
-                { value: 'salesDecline', label: '매출 감소' },
-                { value: 'profitDecline', label: '영업이익 감소' },
-                { value: 'other', label: '기타' },
-              ]}
-            />
-          )}
-        </Field>
-        <Field label="대상 판매 방식">
-          {(id) => <Select id={id} value={p.channel} onChange={(v) => setP({ ...p, channel: v })} options={[{ value: 'all', label: '전체' }, ...CHANNELS.map((c) => ({ value: c, label: CHANNEL_LABEL[c] }))]} />}
-        </Field>
-        <Field label="분석 기간" error={show('analysis')} className="sm:col-span-2">
+        <Field label="언제 기간을 볼까요?" error={show('analysis')} hint="비교 기간은 바로 앞 같은 길이로 정해져요. 바꾸려면 상세 옵션에서." className="sm:col-span-2">
           {() => (
             <div className="flex flex-wrap items-center gap-2">
-              <input type="date" aria-label="분석 시작" className="rounded-lg border border-slate-300 px-2 py-1.5 text-sm" value={p.analysis.start} onChange={(e) => setP({ ...p, analysis: { ...p.analysis, start: e.target.value } })} />
+              <input type="date" aria-label="분석 시작" className="rounded-lg border border-slate-300 px-2 py-1.5 text-sm" value={p.analysis.start} onChange={(e) => setAnalysis({ ...p.analysis, start: e.target.value })} />
               <span>~</span>
-              <input type="date" aria-label="분석 종료" className="rounded-lg border border-slate-300 px-2 py-1.5 text-sm" value={p.analysis.end} onChange={(e) => setP({ ...p, analysis: { ...p.analysis, end: e.target.value } })} />
-            </div>
-          )}
-        </Field>
-        <Field label="비교 기간" error={show('compare')} className="sm:col-span-2">
-          {() => (
-            <div className="flex flex-wrap items-center gap-2">
-              <input type="date" aria-label="비교 시작" className="rounded-lg border border-slate-300 px-2 py-1.5 text-sm" value={p.compare.start} onChange={(e) => setP({ ...p, compare: { ...p.compare, start: e.target.value } })} />
-              <span>~</span>
-              <input type="date" aria-label="비교 종료" className="rounded-lg border border-slate-300 px-2 py-1.5 text-sm" value={p.compare.end} onChange={(e) => setP({ ...p, compare: { ...p.compare, end: e.target.value } })} />
-              <Button size="sm" onClick={() => isValidRange(p.analysis) && setP({ ...p, compare: previousRange(p.analysis) })}>
-                직전 같은 기간
-              </Button>
+              <input type="date" aria-label="분석 종료" className="rounded-lg border border-slate-300 px-2 py-1.5 text-sm" value={p.analysis.end} onChange={(e) => setAnalysis({ ...p.analysis, end: e.target.value })} />
             </div>
           )}
         </Field>
         <div className="sm:col-span-2">
-          <MetricPicker label="목표 지표" value={p.target} onChange={(t) => setP({ ...p, target: t })} />
+          <More summary="상세 옵션 (선택): 비교 기간·대상·적용 요일·목표 지표·메모" defaultOpen={!!show('compare')}>
+            <div className="grid gap-3 rounded-lg p-3 ring-1 ring-slate-200 sm:grid-cols-2">
+              <Field label="비교 기간" error={show('compare')} className="sm:col-span-2">
+                {() => (
+                  <div className="flex flex-wrap items-center gap-2">
+                    <input type="date" aria-label="비교 시작" className="rounded-lg border border-slate-300 px-2 py-1.5 text-sm" value={p.compare.start} onChange={(e) => setP({ ...p, compare: { ...p.compare, start: e.target.value } })} />
+                    <span>~</span>
+                    <input type="date" aria-label="비교 종료" className="rounded-lg border border-slate-300 px-2 py-1.5 text-sm" value={p.compare.end} onChange={(e) => setP({ ...p, compare: { ...p.compare, end: e.target.value } })} />
+                    <Button size="sm" onClick={() => isValidRange(p.analysis) && setP({ ...p, compare: previousRange(p.analysis) })}>
+                      직전 같은 기간
+                    </Button>
+                  </div>
+                )}
+              </Field>
+              <Field label="유형">
+                {(id) => (
+                  <Select
+                    id={id}
+                    value={p.type}
+                    onChange={(v) => setP({ ...p, type: v })}
+                    options={[
+                      { value: 'salesDecline', label: '매출 감소' },
+                      { value: 'profitDecline', label: '영업이익 감소' },
+                      { value: 'other', label: '기타' },
+                    ]}
+                  />
+                )}
+              </Field>
+              <Field label="대상 판매 방식">
+                {(id) => <Select id={id} value={p.channel} onChange={(v) => setP({ ...p, channel: v })} options={[{ value: 'all', label: '전체' }, ...CHANNELS.map((c) => ({ value: c, label: CHANNEL_LABEL[c] }))]} />}
+              </Field>
+              <div className="sm:col-span-2">
+                <WeekdayPicker value={p.weekdays} onChange={(v) => setP({ ...p, weekdays: v })} hint="고르지 않으면 전체 기간. 고르면 분석·비교 기간의 그 요일만 보고, 여기서 만든 실행 계획에도 이어져요." />
+              </div>
+              <div className="sm:col-span-2">
+                <MetricPicker label="목표 지표" value={p.target} onChange={(t) => setP({ ...p, target: t })} />
+              </div>
+              <Field label="목표값" hint={unit === 'pct' ? '% 단위' : unit === 'won' ? '원 단위' : undefined}>
+                {(id) => <NumberInput id={id} value={p.targetValue} onChange={(v) => setP({ ...p, targetValue: v })} allowNegative allowDecimal={unit === 'pct'} suffix={unit === 'pct' ? '%' : unit === 'won' ? '원' : unit === 'people' ? '명' : '건'} />}
+              </Field>
+              <Field label="메모" className="sm:col-span-2">
+                {(id) => <TextArea id={id} value={p.memo} onChange={(v) => setP({ ...p, memo: v })} />}
+              </Field>
+            </div>
+          </More>
         </div>
-        <Field label="목표값" hint={unit === 'pct' ? '% 단위' : unit === 'won' ? '원 단위' : undefined}>
-          {(id) => <NumberInput id={id} value={p.targetValue} onChange={(v) => setP({ ...p, targetValue: v })} allowNegative allowDecimal={unit === 'pct'} suffix={unit === 'pct' ? '%' : unit === 'won' ? '원' : unit === 'people' ? '명' : '건'} />}
-        </Field>
-        <Field label="메모" className="sm:col-span-2">
-          {(id) => <TextArea id={id} value={p.memo} onChange={(v) => setP({ ...p, memo: v })} />}
-        </Field>
       </div>
     </Modal>
   );
 }
 
-function ProblemView({ problem, onEdit, onDelete }: { problem: Problem; onEdit: () => void; onDelete: () => void }) {
+
+function ProblemView({ problem, onEdit, onDelete, draft = false }: { problem: Problem; onEdit: () => void; onDelete: () => void; draft?: boolean }) {
   const data = useData();
   const { navigate, route, update } = useApp();
+  // 미리 보기에서 사용자가 저장을 누르거나 계획을 만들 때만 점검 목록에 넣는다
+  const saveDraft = () => {
+    if (!draft) return true;
+    return update((d) => ({ ...d, problems: [...d.problems, problem] }), '점검 목록에 저장했어요.');
+  };
   const valid = isValidRange(problem.analysis) && isValidRange(problem.compare);
   const dx = useMemo(() => (valid ? diagnose(data, problem) : null), [data, problem, valid]);
   const solutions = data.solutions.filter((s) => s.problemId === problem.id);
   const unit = METRIC_META[problem.target.key].unit;
   // 분석 기간이 마지막 매출 입력일 뒤까지 잡혀 있으면 홈 '최근 4주'와 숫자가 달라진다. 자동으로 바꾸지 않고 맞추기 버튼만 보여준다
   const ref = referenceDate(data);
-  const home = presetRanges('recent28', todayStr(), ref);
+  const home = presetRanges('recent28', appToday(data), ref);
   const pastRef = valid && problem.analysis.end > ref && !(problem.analysis.start === home.cur.start && problem.analysis.end === home.cur.end);
 
   return (
     <div className="min-w-0 space-y-4">
+      {dx && <FocusCard dx={dx} focus={route.params.finding} problem={problem} />}
       <Card
         title={problem.name}
-        subtitle={`${PROBLEM_TYPE_LABEL[problem.type]} · 대상 ${problem.channel === 'all' ? '전체' : CHANNEL_LABEL[problem.channel]} · 분석 ${formatRange(problem.analysis)} / 비교 ${formatRange(problem.compare)}`}
+        subtitle={`${PROBLEM_TYPE_LABEL[problem.type]} · 대상 ${problem.channel === 'all' ? '전체' : CHANNEL_LABEL[problem.channel]} · 분석 ${formatRange(problem.analysis)} / 비교 ${formatRange(problem.compare)}${weekdaysText(problem.weekdays) ? ` · ${weekdaysText(problem.weekdays)}만` : ''}`}
         actions={
-          <>
-            <Button size="sm" onClick={onEdit}>
-              수정
+          draft ? (
+            <Button size="sm" variant="primary" onClick={() => saveDraft() && navigate('diagnosis', { problem: problem.id })}>
+              점검 목록에 저장
             </Button>
-            <Button size="sm" variant="danger" onClick={onDelete}>
-              삭제
-            </Button>
-          </>
+          ) : (
+            <>
+              <Button size="sm" onClick={onEdit}>
+                수정
+              </Button>
+              <Button size="sm" variant="danger" onClick={onDelete}>
+                삭제
+              </Button>
+            </>
+          )
         }
       >
+        {draft && <p className="mb-3 text-sm text-slate-700" aria-label="미리 보기">아직 저장하지 않은 미리 보기예요. 읽기만 해서는 점검 목록에 남지 않아요.</p>}
         {problem.memo && <p className="mb-3 text-sm text-slate-600">{problem.memo}</p>}
         {pastRef && (
           <Notice tone="warn">
@@ -273,7 +320,7 @@ function ProblemView({ problem, onEdit, onDelete }: { problem: Problem; onEdit: 
               {dx.target.achieved === null && problem.targetValue !== null && <span className="text-xs text-slate-400">데이터 필요</span>}
             </div>
             <div className="flex flex-col justify-center gap-2 rounded-lg bg-slate-50 p-3">
-              <Button variant="primary" onClick={() => navigate('solutions', { problem: problem.id, new: '1' })}>
+              <Button variant="primary" onClick={() => saveDraft() && navigate('solutions', { problem: problem.id, new: '1' })}>
                 이 문제의 실행 계획 등록
               </Button>
               <span className="text-xs text-slate-500">연결된 실행 계획 {solutions.length}개</span>
@@ -287,7 +334,7 @@ function ProblemView({ problem, onEdit, onDelete }: { problem: Problem; onEdit: 
       ) : (
         <>
           <RecordGapsNotice periods={[['비교 기간', dx.prev], ['분석 기간', dx.cur]]} />
-          <TopFindings dx={dx} problem={problem} focus={route.params.finding} />
+          <TopFindings dx={dx} problem={problem} focus={route.params.finding} onBeforePlan={saveDraft} />
           {dx.caveats.length > 0 && (
             <Notice tone="warn">
               <p className="font-medium">데이터 주의사항</p>
@@ -301,7 +348,15 @@ function ProblemView({ problem, onEdit, onDelete }: { problem: Problem; onEdit: 
           <Step1 dx={dx} />
           <Step2 dx={dx} />
           <Step3 dx={dx} />
-          <Step4 dx={dx} problem={problem} />
+          <Step4 dx={dx} problem={problem} onBeforePlan={saveDraft} />
+          {problem.channel !== 'hall' && (
+            <p className="text-sm text-slate-700">
+              신규·재주문 고객 수를 배달앱 통계에서 볼 수 있으면 원인을 확인하는 데 도움이 돼요.{' '}
+              <button type="button" className="font-medium underline" onClick={() => navigate('sales', { tab: 'customers' })}>
+                고객 지표 입력 (선택)
+              </button>
+            </p>
+          )}
           {solutions.length > 0 && (
             <Card title="연결된 실행 계획">
               <ul className="divide-y divide-slate-100">
@@ -317,7 +372,7 @@ function ProblemView({ problem, onEdit, onDelete }: { problem: Problem; onEdit: 
                           실행 계획 보기
                         </Button>
                         <Button size="sm" onClick={() => navigate('performance', { solution: s.id })}>
-                          성과 확인
+                          {resultLabel(s)}
                         </Button>
                       </span>
                     </li>
@@ -332,9 +387,61 @@ function ProblemView({ problem, onEdit, onDelete }: { problem: Problem; onEdit: 
   );
 }
 
+/**
+ * 장사 점검 첫 카드: 같은 기간의 먼저 살펴볼 변화 하나를 쉬운 말로, 바로 아래 실제로 열 수 있는 다음 행동 하나.
+ * 홈 카드에서 들어오면 그 항목(finding)을 그대로 연다. 추정 영향 금액은 접힌 상세에서 실제 이익 차이와 구분한다.
+ */
+function FocusCard({ dx, focus, problem }: { dx: DiagnosisResult; focus?: string; problem: Problem }) {
+  const data = useData();
+  const { navigate } = useApp();
+  const w = periodWords(appToday(data), referenceDate(data), problem.analysis, problem.compare);
+  const groups = topIssues(dx, 3);
+  const f = (focus ? (groups.find((g) => g.id === focus) ?? dx.findings.find((x) => x.id === focus)) : undefined) ?? groups[0];
+  const scroll = (id: string) => () => document.getElementById(id)?.scrollIntoView?.({ behavior: 'smooth', block: 'start' });
+  const action = (x: Finding): { label: string; run: () => void } | null => {
+    if (x.id.startsWith('gap-')) {
+      const g = recordGaps(data, dx.cur).find((r) => r.kind === 'sales') ?? recordGaps(data, dx.prev).find((r) => r.kind === 'sales');
+      return g ? { label: '빠진 매출 기록하기', run: () => navigate('sales', gapTarget(g)) } : null;
+    }
+    if (x.id.startsWith('nodata-')) return { label: '매출 기록 보기', run: () => navigate('sales') };
+    if (x.id.startsWith('cust-')) return { label: '고객 지표 보기', run: () => navigate('sales', { tab: 'customers' }) };
+    if (x.id.startsWith('hall-visitors')) return { label: '이전 기간과 방문 수 비교', run: scroll('step-2') };
+    if (/-orders-/.test(x.id)) return { label: '이전 기간과 주문 수 비교', run: scroll('step-2') };
+    if (/ticket|aov/.test(x.id)) return { label: '이전 기간과 객단가 비교', run: scroll('step-2') };
+    if (/-unit-profit-|-discount-|-cost-|-rate-|^common-/.test(x.id)) return { label: '이전 기간과 비용 비교', run: scroll('step-3') };
+    if (x.id === 'bizdays') return { label: '판매 방식별 매출 비교', run: scroll('step-1') };
+    return null;
+  };
+  const act = f ? action(f) : null;
+  return (
+    <section aria-label="먼저 살펴볼 변화" className="rounded-xl bg-white p-4 shadow-sm ring-2 ring-slate-900 sm:p-5">
+      <h2 className="text-base font-semibold text-slate-900">먼저 살펴볼 변화</h2>
+      <p className="text-xs text-slate-600">
+        {w.name} · {w.compare}
+      </p>
+      {f ? (
+        <>
+          <p className="mt-2 text-base font-medium text-slate-900">{plainFact(f, w.name, w.than)}</p>
+          {act && (
+            <Button size="sm" variant="primary" className="mt-2" onClick={act.run}>
+              {act.label}
+            </Button>
+          )}
+          <p className="mt-1 text-xs text-slate-600">원인으로 확인된 것은 아니에요.</p>
+          <ImpactDetail finding={f} s={dx.cur} p={dx.prev} />
+        </>
+      ) : (
+        <div className="mt-2">
+          <NeedMoreRecords data={data} s={dx.cur} p={dx.prev} than={w.than} />
+        </div>
+      )}
+    </section>
+  );
+}
+
 function Step1({ dx }: { dx: DiagnosisResult }) {
   return (
-    <Card title="① 어느 판매 방식의 변화가 전체 매출 변화에 영향을 주었나" subtitle={dx.channelNote}>
+    <Card id="step-1" title="① 어느 판매 방식의 변화가 전체 매출 변화에 영향을 주었나" subtitle={dx.channelNote}>
       <TableWrap>
         <thead>
           <tr>
@@ -406,7 +513,7 @@ function Step1({ dx }: { dx: DiagnosisResult }) {
 
 function Step2({ dx }: { dx: DiagnosisResult }) {
   return (
-    <Card title="② 손님·주문 수와 객단가 중 무엇이 변했나">
+    <Card id="step-2" title="② 손님·주문 수와 객단가 중 무엇이 변했나">
       <ul className="mb-3 space-y-1 text-sm text-slate-800">
         {dx.quantityPrice.map((r) => {
           const text = quantityPriceText(r);
@@ -482,7 +589,7 @@ function Step3({ dx }: { dx: DiagnosisResult }) {
   const rows = showAll ? dx.costChanges : major;
   const hidden = dx.costChanges.length - major.length;
   return (
-    <Card title="③ 어떤 비용이 변했나" subtitle="판매 방식별 비용은 주문 1건 기준, 공통 운영비는 영업일 1일 기준으로 비교합니다. 주문이 늘어 총액만 늘고 1건당 비용이 같으면 문제로 보지 않습니다.">
+    <Card id="step-3" title="③ 어떤 비용이 변했나" subtitle="판매 방식별 비용은 주문 1건 기준, 공통 운영비는 영업일 1일 기준으로 비교합니다. 주문이 늘어 총액만 늘고 1건당 비용이 같으면 문제로 보지 않습니다.">
       {!dx.costChanges.length ? (
         <p className="text-sm text-slate-600">두 기간 모두 비용 입력이 없습니다.</p>
       ) : (
@@ -590,11 +697,11 @@ function DiscountTable({ dx }: { dx: DiagnosisResult }) {
  * 진단 항목으로 실행 계획을 만들 때, 같은 문제에 같은 예시(템플릿)로 만든 계획이 이미 있으면 먼저 묻는다.
  * 예시가 없는 항목은 미리 채워질 계획 이름이 같은지로 판단한다.
  */
-function usePlanFromFinding(problem: Problem) {
+function usePlanFromFinding(problem: Problem, onBeforePlan: () => boolean = () => true) {
   const data = useData();
   const { navigate } = useApp();
   const [dup, setDup] = useState<{ findingId: string; existing: Solution[] } | null>(null);
-  const go = (findingId: string) => navigate('solutions', { problem: problem.id, new: '1', finding: findingId });
+  const go = (findingId: string) => onBeforePlan() && navigate('solutions', { problem: problem.id, new: '1', finding: findingId });
   const start = (f: Finding) => {
     const tpl = templateForFinding(f.id);
     const draftName = `${f.title} 확인·개선`;
@@ -634,8 +741,8 @@ function usePlanFromFinding(problem: Problem) {
 }
 
 /** 문제 화면 상단: 영향 금액이 큰 확인 항목 3개와 실행 계획 버튼 */
-function TopFindings({ dx, problem, focus }: { dx: DiagnosisResult; problem: Problem; focus?: string }) {
-  const plan = usePlanFromFinding(problem);
+function TopFindings({ dx, problem, focus, onBeforePlan }: { dx: DiagnosisResult; problem: Problem; focus?: string; onBeforePlan?: () => boolean }) {
+  const plan = usePlanFromFinding(problem, onBeforePlan);
   const top = topIssues(dx, 3);
   if (!top.length) return null;
   return (
@@ -663,8 +770,8 @@ function TopFindings({ dx, problem, focus }: { dx: DiagnosisResult; problem: Pro
   );
 }
 
-function Step4({ dx, problem }: { dx: DiagnosisResult; problem: Problem }) {
-  const plan = usePlanFromFinding(problem);
+function Step4({ dx, problem, onBeforePlan }: { dx: DiagnosisResult; problem: Problem; onBeforePlan?: () => boolean }) {
+  const plan = usePlanFromFinding(problem, onBeforePlan);
   const [showAll, setShowAll] = useState(false);
   // 상위 목록과 같은 기준: 영업이익 영향이 큰 순서 → 매출 영향만 있는 항목 → 계산할 수 없는 항목
   const sorted = byImpact(dx.findings);

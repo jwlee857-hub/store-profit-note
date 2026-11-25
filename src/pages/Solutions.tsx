@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
+import { CheckSteps } from '../components/CheckSteps';
 import { MetricPicker, validMetricRef } from '../components/MetricPicker';
+import { WeekdayPicker } from '../components/WeekdayPicker';
 import {
   Badge,
   Button,
@@ -21,12 +23,12 @@ import {
   type BadgeTone,
 } from '../components/ui';
 import { computeSummary, expectedProfitChange, getMetric } from '../domain/calc';
-import { addDays, daysInclusive, formatRange, isValidDate, isValidRange, nextMonday as nextMondayOf, previousRange, todayStr } from '../domain/dates';
+import { addDays, daysInclusive, formatRange, isValidDate, isValidRange, nextMonday as nextMondayOf, previousRange } from '../domain/dates';
 import { retestDraft, solutionDraft } from '../domain/draft';
 import { newSolution } from '../domain/factory';
-import { couponText, fmt, fmtKpiTarget, fmtSigned, josa, kpiTargetSuffix } from '../domain/format';
-import { CHANNEL_LABEL, DECISION_LABEL, DIRECTION_LABEL, METRIC_META, STATUS_LABEL, metricLabelEasy } from '../domain/labels';
-import { KPI_MODE_LABEL, kpiModeAllowed, kpiTargetWarning, recentRanges } from '../domain/periods';
+import { couponText, fmt, fmtKpiTarget, fmtSigned, hasCoupon, josa, kpiTargetSuffix, weekdaysText } from '../domain/format';
+import { CHANNEL_LABEL, DECISION_LABEL, DIRECTION_LABEL, METRIC_META, STATUS_LABEL, metricLabelEasy, resultLabel } from '../domain/labels';
+import { appToday, KPI_MODE_LABEL, kpiModeAllowed, kpiTargetWarning, recentRanges } from '../domain/periods';
 import { DELIVERY_KPI_SET, SOLUTION_TEMPLATES, defaultKpisFor, sameMetric } from '../domain/templates';
 import { CHANNELS, type KpiTargetMode, type MetricRef, type Solution, type SolutionStatus } from '../domain/types';
 import { useApp, useData } from '../state/AppContext';
@@ -41,9 +43,13 @@ export function Solutions() {
 
   useEffect(() => {
     const prev = route.params.retest ? data.solutions.find((x) => x.id === route.params.retest) : undefined;
-    if (prev) {
-      // 성과 확인의 '이 조건으로 2주 재시험'에서만 이전 계획의 조건을 넘긴다
-      setEditing(retestDraft(prev, todayStr()));
+    const existing = prev ? data.solutions.find((s) => s.retestOf === prev.id) : undefined;
+    if (existing) {
+      // 이미 이어진 재시험이 있으면 새로 만들지 않고 그 계획을 보여준다 (반복 클릭·새로고침으로 중복 생성 방지)
+      navigate('performance', { solution: existing.id });
+    } else if (prev) {
+      // 성과 확인의 '이 조건으로 재시험 만들기'에서만 이전 계획의 조건을 넘긴다
+      setEditing(retestDraft(prev, appToday(data)));
       navigate('solutions', prev.problemId ? { problem: prev.problemId } : {});
     } else if (route.params.new === '1') {
       const problem = data.problems.find((p) => p.id === route.params.problem) ?? null;
@@ -56,11 +62,13 @@ export function Solutions() {
 
   const list = data.solutions.filter((s) => problemFilter === 'all' || (problemFilter === 'none' ? s.problemId === null : s.problemId === problemFilter));
 
+  const focusSol = data.solutions.find((s) => s.id === route.params.solution);
   return (
     <>
+      <CheckSteps current="solutions" problemId={focusSol?.problemId ?? (problemFilter !== 'all' && problemFilter !== 'none' ? problemFilter : null)} solutionId={focusSol?.id} />
       <PageHeader
         title="실행 계획"
-        description="무엇을, 언제까지 해보고, 무엇으로 확인할지 정합니다. 자세한 항목은 나중에 채워도 됩니다."
+        description="무엇을 바꿔 보고, 언제 결과를 볼지 정해요."
         actions={
           <Button variant="primary" onClick={() => setEditing(newSolution({ problemId: problemFilter !== 'all' && problemFilter !== 'none' ? problemFilter : null }))}>
             실행 계획 등록
@@ -132,7 +140,7 @@ export function Solutions() {
                       수정
                     </Button>
                     <Button size="sm" variant="primary" onClick={() => navigate('performance', { solution: s.id })}>
-                      성과 확인
+                      {resultLabel(s)}
                     </Button>
                     <Button
                       size="sm"
@@ -172,6 +180,7 @@ export function Solutions() {
                       {metricLabelEasy(s.kpi.key, s.kpi.channel)} 목표 {fmtKpiTarget(s.kpiTarget, s.kpiTargetMode, kpiUnit, METRIC_META[s.kpi.key].higherIsBetter)}
                     </p>
                     {s.extraKpis.length > 0 && <p className="mt-1 text-xs text-slate-600">함께 보기: {s.extraKpis.map((k) => metricLabelEasy(k.key, k.channel)).join(', ')}</p>}
+                    {weekdaysText(s.weekdays) && <p className="mt-1 text-xs text-slate-700">적용 요일: {weekdaysText(s.weekdays)}</p>}
                     {couponText(s.coupon, data.routes.find((r) => r.id === s.coupon.routeId)?.name) && <p className="mt-1 text-xs text-slate-700">{couponText(s.coupon, data.routes.find((r) => r.id === s.coupon.routeId)?.name)}</p>}
                     {s.review.nextCouponAmount !== null && <p className="text-xs text-slate-700">결과 판단: 다음 기간 쿠폰 {s.review.nextCouponAmount === 0 ? '없음' : fmt(s.review.nextCouponAmount, 'won')}</p>}
                     {s.successCriteria && <p className="mt-1 text-xs text-emerald-800">성공: {s.successCriteria}</p>}
@@ -208,8 +217,8 @@ function SolutionEditor({ initial, onClose }: { initial: Solution; onClose: () =
   const datesOk = !!(s.start && s.end && isValidDate(s.start) && isValidDate(s.end) && s.start <= s.end);
   const fallbackRange = problem && isValidRange(problem.analysis) ? problem.analysis : recentRanges(data).cur;
   const beforeRange = datesOk ? previousRange({ start: s.start!, end: s.end! }) : null;
-  const beforeSummary = useMemo(() => (beforeRange ? computeSummary(data, beforeRange) : null), [data, beforeRange?.start, beforeRange?.end]); // eslint-disable-line react-hooks/exhaustive-deps
-  const fallbackSummary = useMemo(() => computeSummary(data, fallbackRange), [data, fallbackRange.start, fallbackRange.end]); // eslint-disable-line react-hooks/exhaustive-deps
+  const beforeSummary = useMemo(() => (beforeRange ? computeSummary(data, beforeRange, s.weekdays) : null), [data, beforeRange?.start, beforeRange?.end, s.weekdays]); // eslint-disable-line react-hooks/exhaustive-deps
+  const fallbackSummary = useMemo(() => computeSummary(data, fallbackRange, s.weekdays), [data, fallbackRange.start, fallbackRange.end, s.weekdays]); // eslint-disable-line react-hooks/exhaustive-deps
   const useBefore = !!beforeSummary && beforeSummary.entryCount > 0;
   const baseRange = useBefore ? beforeRange! : fallbackRange;
   const baseSummary = useBefore ? beforeSummary! : fallbackSummary;
@@ -256,7 +265,7 @@ function SolutionEditor({ initial, onClose }: { initial: Solution; onClose: () =
     onClose();
   };
 
-  const nextMonday = nextMondayOf(todayStr());
+  const nextMonday = nextMondayOf(appToday(data));
 
   return (
     <Modal
@@ -330,6 +339,9 @@ function SolutionEditor({ initial, onClose }: { initial: Solution; onClose: () =
               )}
             </Field>
           </div>
+          {/* 쿠폰 조건은 배달 계획이거나 이미 쿠폰 조건이 있는 계획에서만. 쿠폰 계획(저장된 조건·쿠폰 예시)은 펼쳐서 바로 보인다 */}
+          {(s.target === 'delivery' || hasCoupon(initial.coupon)) && (
+          <More summary="쿠폰·할인 조건" defaultOpen={hasCoupon(initial.coupon) || initial.templateId === 'delivery-discount'}>
           <fieldset aria-label="쿠폰·할인 조건" className="rounded-lg p-3 ring-1 ring-slate-200">
             <legend className="px-1 text-sm font-medium text-slate-800">쿠폰·할인 조건 (선택)</legend>
             {s.target === 'delivery' && deliveryApps.length > 0 && (
@@ -364,10 +376,13 @@ function SolutionEditor({ initial, onClose }: { initial: Solution; onClose: () =
             </p>
             <p className="mt-1 text-xs text-slate-500">조건을 적어 두면 성과 확인에서 어떤 쿠폰으로 낸 결과인지 함께 보여 줘요. 비워 둬도 됩니다.</p>
           </fieldset>
+          </More>
+          )}
         </section>
 
         <section className="space-y-3">
-          <h3 className="text-base font-semibold">2. 언제부터 언제까지 해볼까요?</h3>
+          <h3 className="text-base font-semibold">2. 언제 결과를 볼까요?</h3>
+          <p className="-mt-2 text-sm text-slate-700">해볼 기간을 정하면 끝난 뒤 그 직전 같은 길이 기간과 비교해요.</p>
           <div className="grid grid-cols-2 gap-3">
             <Field label="시작일" error={show('start')}>
               {(id) => <DateInput id={id} value={s.start} onChange={(v) => set('start', v || null)} />}
@@ -387,8 +402,10 @@ function SolutionEditor({ initial, onClose }: { initial: Solution; onClose: () =
           </div>
         </section>
 
+        <More summary="상세 옵션 (선택): 목표 지표·적용 요일·예상 효과·담당자·성공/중단 기준">
+        <div className="space-y-5 rounded-lg p-3 ring-1 ring-slate-200">
         <section className="space-y-3">
-          <h3 className="text-base font-semibold">3. 무엇이 좋아졌는지 확인할까요?</h3>
+          <h3 className="text-base font-semibold">무엇으로 확인할까요?</h3>
           <MetricPicker
             label="주 지표 (목표를 정할 지표)"
             value={s.kpi}
@@ -452,11 +469,9 @@ function SolutionEditor({ initial, onClose }: { initial: Solution; onClose: () =
           {targetWarn === 'noImprovement' && (
             <Notice tone="warn">목표가 0 이하라서 실행 전보다 나아지지 않아도 달성으로 보일 수 있어요. 0보다 큰 값으로 정하세요.</Notice>
           )}
-          {s.target !== 'common' && <p className="text-sm text-slate-700">성과 확인에서는 다른 판매 방식과 가게 전체 영업이익도 함께 보여줍니다.</p>}
         </section>
-
-        <More summary="상세 옵션 (선택): 담당자·원인 가설·예산·예상 효과·성공/중단 기준">
-          <div className="space-y-4 rounded-lg p-3 ring-1 ring-slate-200">
+        <WeekdayPicker value={s.weekdays} onChange={(v) => setS((x) => ({ ...x, weekdays: v }))} hint="예: 토요일 영업시간만 바꿨다면 토요일. 고르지 않으면 전체 기간으로 비교해요." />
+          <div className="space-y-4">
             <div className="grid gap-3 sm:grid-cols-2">
               <Field label="담당자" hint="이름 대신 역할로 적어도 됩니다.">
                 {(id) => <TextInput id={id} value={s.owner} onChange={(v) => set('owner', v)} placeholder="예: 점장" />}
@@ -518,6 +533,7 @@ function SolutionEditor({ initial, onClose }: { initial: Solution; onClose: () =
               <Field label="중단 기준">{(id) => <TextArea id={id} value={s.stopCriteria} onChange={(v) => set('stopCriteria', v)} />}</Field>
             </div>
           </div>
+        </div>
         </More>
       </div>
     </Modal>
@@ -542,6 +558,7 @@ function extraCandidates(target: Solution['target']): MetricRef[] {
     { key: 'operatingProfit', channel: 'all' },
     { key: 'storeDiscount', channel: ch },
     ch === 'hall' ? { key: 'visitors', channel: 'hall' } : { key: 'orders', channel: ch },
+    ...(ch === 'hall' ? [{ key: 'meals', channel: 'hall' } as MetricRef] : []),
     { key: 'avgTicket', channel: ch },
     { key: 'netSales', channel: ch },
     { key: 'totalSales', channel: 'all' },

@@ -1,12 +1,14 @@
 // 배달앱 정산 반영: 정산일에 여러 날의 할인·환불·실제 수수료를 한 번에 보완한다. UI와 무관한 순수 함수.
 // - 실제 수수료는 actual로 넣는다 → 계산·추정 수수료를 대체(합산하지 않음). 식재료비 등 다른 항목은 건드리지 않는다.
 // - 순매출 직접 입력 기록에 할인을 나중에 넣어도 할인은 상세 정보일 뿐 다시 빼지 않는다(netSales 규칙 그대로).
-// - 정산서에 기간 합계만 있으면 기간 비용(배달앱·판매 방식·기간 범위 보존)으로 저장하고, 그 범위의 일별 계산·추정 수수료는 계산에서 뺀다.
+// - 정산서에 기간 합계만 있으면 기간 비용(배달앱·판매 방식·기간 범위 보존)으로 저장한다. 그 범위 수수료의 최종 금액은 기간 합계이고 일별 금액은 내역일 뿐이다.
 // - 같은 정산서를 다시 저장해도 같은 결과(값을 더하지 않고 바꿔 넣음).
 import { coveredByPeriodCost, discountDetailKnown, effectiveCost, netSales, requiredCategories, routeHasPlatform, settledByPeriod } from './calc';
 import { fillEstimates, refreshEstimates } from './entry';
 import { uid } from './factory';
+import { validateSalesEntry } from './validation';
 import { fmt } from './format';
+import { krRange } from './dates';
 import type { AppData, Channel, DateRange, DateStr, PeriodCost, SalesEntry } from './types';
 
 const FEES = ['brokerage', 'payment'] as const;
@@ -74,22 +76,26 @@ export interface PeriodSettlement {
 }
 
 export interface PeriodOverlap {
-  /** 이 기간에 이미 일별로 넣은 실제 수수료 */
+  /** 이 기간에 일별로 넣은 실제 수수료 — 기간 합계에 포함된 내역으로 본다 (따로 더하지 않음) */
   dailyActual: { count: number; amount: number };
   /** 기간 합계로 대체되는 일별 계산·추정 수수료 */
   calculated: { count: number; amount: number };
-  /** 같은 배달앱·판매 방식의 겹치는 기간 합계 (다시 저장하면 바꿔 넣는다) */
+  /** 같은 배달앱·판매 방식·같은 기간의 기존 합계 (다시 저장하면 바꿔 넣는다) */
   replaced: PeriodCost[];
+  /** 같은 배달앱·판매 방식의 기간이 일부만 겹치는 기존 합계 — 겹친 금액을 나눌 근거가 없어 저장하지 않는다 */
+  conflicts: { cost: PeriodCost; start: DateStr; end: DateStr }[];
 }
 
 const isSettlement = (pc: PeriodCost, routeId: string, channel: Channel) => pc.routeId === routeId && pc.attribution === channel;
 
+/** 일별 실제 수수료 합 (없으면 null) */
+const dailyFee = (e: SalesEntry) => FEES.filter((c) => !(c === 'payment' && e.bundledFee)).reduce<number | null>((s, c) => (e.costs[c].actual === null ? s : (s ?? 0) + e.costs[c].actual!), null);
+
 export function periodOverlap(data: Pick<AppData, 'sales' | 'periodCosts'>, ps: PeriodSettlement): PeriodOverlap {
-  const list = settlementEntries(data, ps.routeId, ps.channel, ps);
   const dailyActual = { count: 0, amount: 0 };
   const calculated = { count: 0, amount: 0 };
-  for (const e of list) {
-    const act = FEES.filter((c) => !(c === 'payment' && e.bundledFee)).reduce<number | null>((s, c) => (e.costs[c].actual === null ? s : (s ?? 0) + e.costs[c].actual!), null);
+  for (const e of settlementEntries(data, ps.routeId, ps.channel, ps)) {
+    const act = dailyFee(e);
     if (act !== null) {
       dailyActual.count++;
       dailyActual.amount += act;
@@ -100,31 +106,29 @@ export function periodOverlap(data: Pick<AppData, 'sales' | 'periodCosts'>, ps: 
       calculated.amount += calc;
     }
   }
-  const replaced = data.periodCosts.filter((pc) => isSettlement(pc, ps.routeId, ps.channel) && pc.start <= ps.end && ps.start <= pc.end);
-  return { dailyActual, calculated, replaced };
+  const same = data.periodCosts.filter((pc) => isSettlement(pc, ps.routeId, ps.channel) && pc.start <= ps.end && ps.start <= pc.end);
+  const replaced = same.filter((pc) => pc.start === ps.start && pc.end === ps.end);
+  const conflicts = same
+    .filter((pc) => !replaced.includes(pc))
+    .map((cost) => ({ cost, start: cost.start > ps.start ? cost.start : ps.start, end: cost.end < ps.end ? cost.end : ps.end }));
+  return { dailyActual, calculated, replaced, conflicts };
 }
 
 /**
- * 기간 합계 저장.
- * - keepDaily: 일별 실제액은 그대로 두고, 기간 합계에서 그만큼 뺀 나머지만 기간 비용으로 (겹친 금액을 두 번 넣지 않음)
- * - replaceDaily: 그 기간의 일별 실제 수수료를 지우고 기간 합계 전체를 기간 비용으로
- * 같은 배달앱·판매 방식의 겹치는 기간 합계는 바꿔 넣는다(다시 저장해도 한 번만 반영).
+ * 기간 합계 저장. 기간 합계가 그 범위 수수료의 최종 금액이다(일별 실제액은 그 안의 내역). 어떤 순서로 넣어도 같은 비용이 된다.
+ * - 같은 배달앱·판매 방식·같은 기간: 바꿔 넣는다 (다시 저장해도 한 번만 반영)
+ * - 기간이 일부만 겹침: 겹친 금액을 나눌 근거가 없으므로 저장하지 않고 기존 기록을 그대로 둔다 (겹친 날짜·정정 방법 안내)
  */
-export function applyPeriodSettlement(data: AppData, ps: PeriodSettlement, mode: 'keepDaily' | 'replaceDaily'): { sales: SalesEntry[]; periodCosts: PeriodCost[] } | { error: string } {
+export function applyPeriodSettlement(data: AppData, ps: PeriodSettlement): { periodCosts: PeriodCost[] } | { error: string } {
+  if (!(ps.amount >= 0)) return { error: '금액을 확인하세요.' };
   const ov = periodOverlap(data, ps);
-  const amount = mode === 'keepDaily' ? ps.amount - ov.dailyActual.amount : ps.amount;
-  if (amount < 0) return { error: `일별로 넣은 실제 수수료(${fmt(ov.dailyActual.amount, 'won')})가 기간 합계보다 커요. 금액을 확인하거나 일별 실제액을 기간 합계로 대체하세요.` };
-  const ids = new Set(settlementEntries(data, ps.routeId, ps.channel, ps).map((e) => e.id));
-  const sales =
-    mode === 'replaceDaily'
-      ? data.sales.map((e) =>
-          ids.has(e.id) && FEES.some((c) => e.costs[c].actual !== null)
-            ? { ...e, costs: { ...e.costs, brokerage: { ...e.costs.brokerage, actual: null }, payment: { ...e.costs.payment, actual: null } } }
-            : e,
-        )
-      : data.sales;
-  const replacedIds = new Set(ov.replaced.map((p) => p.id));
-  // shortcut: 기간 합계는 중개·결제를 합친 한 금액으로 중개 수수료 항목에 둔다, 정산서가 둘을 나눠 주면 항목별로 저장한다
+  if (ov.conflicts.length)
+    return {
+      error: ov.conflicts
+        .map((c) => `${krRange(c)}이 이미 저장한 정산 ${krRange(c.cost)} ${fmt(c.cost.amount, 'won')}과 겹쳐요.`)
+        .concat('겹치지 않는 날짜만 입력하거나, 기존 기간 합계를 지운 뒤 두 기간을 합친 금액으로 다시 저장하세요.')
+        .join(' '),
+    };
   const pc: PeriodCost = {
     id: uid('pc'),
     category: 'brokerage',
@@ -132,12 +136,46 @@ export function applyPeriodSettlement(data: AppData, ps: PeriodSettlement, mode:
     nature: 'variable',
     start: ps.start,
     end: ps.end,
-    amount,
+    amount: ps.amount,
     source: 'actual',
-    memo: `배달앱 정산서 기간 합계 ${fmt(ps.amount, 'won')} (중개·결제 수수료)${mode === 'keepDaily' && ov.dailyActual.count ? ` − 일별 실제액 ${ov.dailyActual.count}건 ${fmt(ov.dailyActual.amount, 'won')}` : ''}`,
+    memo: `배달앱 정산서 기간 합계 (중개·결제 수수료)`,
     routeId: ps.routeId,
+    settlementBasis: 'total',
   };
-  return { sales, periodCosts: [...data.periodCosts.filter((p) => !replacedIds.has(p.id)), pc] };
+  const replacedIds = new Set(ov.replaced.map((p) => p.id));
+  return { periodCosts: [...data.periodCosts.filter((p) => !replacedIds.has(p.id)), pc] };
+}
+
+/** 저장된 기간 합계의 내역: "일별 확인 10,000원 / 나머지 60,000원" */
+export function settlementBreakdown(data: Pick<AppData, 'sales'>, pc: PeriodCost): { total: number; daily: number; dailyCount: number; rest: number; unverified: boolean } {
+  let daily = 0;
+  let dailyCount = 0;
+  for (const e of settlementEntries(data, pc.routeId!, pc.attribution as Channel, pc)) {
+    const act = dailyFee(e);
+    if (act !== null) {
+      daily += act;
+      dailyCount++;
+    }
+  }
+  // 확인 필요(이전 방식): 저장된 금액은 잔여액으로 보고 일별 실제액을 더한 값이 지금 계산에 들어간 총액
+  if (pc.settlementBasis === 'unverified') return { total: pc.amount + daily, daily, dailyCount, rest: pc.amount, unverified: true };
+  return { total: pc.amount, daily, dailyCount, rest: pc.amount - daily, unverified: false };
+}
+
+/**
+ * 정산 표 수정 검증: 매출 상세 입력과 같은 규칙(validateSalesEntry)으로 할인·환불을 확인한다.
+ * 오류가 하나라도 있으면 표 전체를 저장하지 않는다 (일부 행만 반영되지 않게). 기록 id → 오류 문구
+ */
+export function validateSettlementEdits(data: AppData, edits: SettleEdit[]): Record<string, string> {
+  const ids = new Set(edits.map((x) => x.id));
+  const out: Record<string, string> = {};
+  for (const e of applySettlementEdits(data, edits)) {
+    if (!ids.has(e.id)) continue;
+    const v = validateSalesEntry(e, data);
+    const msg = v.errors.storeDiscount ?? v.errors.refund;
+    if (msg) out[e.id] = msg;
+  }
+  return out;
 }
 
 // ───────── 홈: 쿠폰 판단에 필요한 정산 할 일 ─────────

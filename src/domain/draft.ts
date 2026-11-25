@@ -2,6 +2,7 @@
 import { formatRange } from './dates';
 import { diagnose, groupFindings, impactText, relatedText, type Finding } from './diagnosis';
 import { newSolution } from './factory';
+import { hasCoupon } from './format';
 import { addDays, nextMonday } from './dates';
 import { defaultKpisFor, kpiForFinding, templateForFinding } from './templates';
 import type { AppData, Problem, Solution } from './types';
@@ -27,6 +28,7 @@ export function solutionDraft(data: AppData, problem: Problem | null, findingId?
       problemId: problem.id,
       target,
       ...(target === 'delivery' ? defaultKpisFor(target) : {}),
+      weekdays: problem.weekdays ?? null,
       evidence: `문제 진단 "${problem.name}" (${periods})`,
     });
   }
@@ -38,6 +40,7 @@ export function solutionDraft(data: AppData, problem: Problem | null, findingId?
     name: tpl ? tpl.name : `${finding.title} 확인·개선`,
     target,
     ...kpis,
+    weekdays: problem.weekdays ?? null,
     direction: tpl?.direction ?? 'mixed',
     // 가설은 진단 화면 문구 그대로 — 원인으로 확정된 것이 아님
     hypothesis: finding.hypotheses.join(' '),
@@ -59,9 +62,11 @@ export function solutionDraft(data: AppData, problem: Problem | null, findingId?
 export function retestDraft(prev: Solution, today: string): Solution {
   const start = nextMonday(today);
   const next = prev.review.nextCouponAmount;
+  // 쿠폰 조건이 없는 계획(예: 홀 영업시간)은 쿠폰 문구·금액을 넘기지 않는다
+  const coupon = hasCoupon(prev.coupon);
   return newSolution({
     problemId: prev.problemId,
-    name: `${prev.name} — ${next === null ? '쿠폰 미정' : next === 0 ? '쿠폰 중단' : `쿠폰 ${next.toLocaleString('ko-KR')}원`} 2주 재시험`,
+    name: `${prev.name} — ${!coupon ? '' : next === null ? '쿠폰 미정 ' : next === 0 ? '쿠폰 중단 ' : `쿠폰 ${next.toLocaleString('ko-KR')}원 `}2주 재시험`,
     target: prev.target,
     direction: prev.direction,
     hypothesis: prev.hypothesis,
@@ -73,9 +78,11 @@ export function retestDraft(prev: Solution, today: string): Solution {
     kpi: prev.kpi,
     extraKpis: prev.extraKpis,
     kpiTargetMode: prev.kpiTargetMode,
-    coupon: { routeId: prev.coupon.routeId, previousAmount: prev.coupon.amount, amount: next, minOrder: prev.coupon.minOrder, usedCount: null },
+    coupon: coupon ? { routeId: prev.coupon.routeId, previousAmount: prev.coupon.amount, amount: next, minOrder: prev.coupon.minOrder, usedCount: null } : { ...prev.coupon, usedCount: null },
+    weekdays: prev.weekdays ?? null,
     successCriteria: prev.successCriteria,
     stopCriteria: prev.stopCriteria,
     templateId: prev.templateId,
+    retestOf: prev.id,
   });
 }

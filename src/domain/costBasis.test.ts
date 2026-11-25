@@ -8,7 +8,8 @@ import { pendingEstimates } from './pending';
 import { migrate, parseBackup, validateData } from '../storage/storage';
 import { SCHEMA_VERSION, type AppData, type FeeRule, type SalesEntry } from './types';
 
-const RANGE = { start: '2026-11-02', end: '2026-11-08' };
+/** 기록이 있는 하루 (그 주의 다른 영업일은 마감 미입력이라 부분 합계가 된다) */
+const RANGE = { start: '2026-11-03', end: '2026-11-03' };
 
 /** 포장 1경로(전화, 플랫폼 없음). 주문 1건당 포장비 500원, 카드 결제 수수료 1.5% 설정 */
 function store(): AppData {
@@ -160,9 +161,10 @@ describe('매출이 미입력인 경우', () => {
     d.sales = [e];
     const day = dayInputStatus(d, '2026-11-04');
     expect(day.slots.map((s) => s.state.kind)).toEqual(['missing']);
-    const s = computeSummary(d, RANGE);
+    const s = computeSummary(d, { start: '2026-11-02', end: '2026-11-08' });
     expect(s.unrecordedDays).toContain('2026-11-04');
-    expect(s.totalSales.value).toBe(200_000); // 미입력일을 추정 매출로 더하지 않음
+    // 미입력일을 추정 매출로 더하지도, 0원으로 확정하지도 않는다: 입력된 기록만 더한 부분 합계
+    expect(s.totalSales).toMatchObject({ value: null, provisional: 200_000, salesGap: true });
     expect(s.status.estimatedAmount).toBe(0);
   });
   it('기록은 있는데 매출 금액이 비어 있으면 미확정이며 추정·계산 표시를 붙이지 않는다', () => {

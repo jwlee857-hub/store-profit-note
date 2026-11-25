@@ -53,6 +53,38 @@ export function Menus() {
     return !v || v.costMode === 'unknown';
   }).length;
 
+  const rowActions = (m: Menu, v: MenuVersion | null) => (
+      <div className="flex flex-wrap items-start gap-1">
+        <Button size="sm" variant="primary" onClick={() => setEditor({ menu: m, version: { ...newVersion(), prices: { ...(v?.prices ?? newVersion().prices) }, costMode: v?.costMode ?? 'unknown', costAmount: v?.costAmount ?? null, costRate: v?.costRate ?? null, costSource: v?.costSource ?? 'actual' }, isNewMenu: false, isNewVersion: true })}>
+          가격·원가 변경
+        </Button>
+        {/* 드물게 쓰는 행동은 더보기에: 과거 입력 오류 수정은 새 가격 적용과 다르다 */}
+        <details aria-label={`${m.name} 더보기`}>
+          <summary className="cursor-pointer list-none rounded-lg px-2.5 py-1.5 text-sm font-medium text-slate-700 ring-1 ring-slate-300 hover:bg-slate-50">더보기</summary>
+          <div className="mt-1 flex w-40 flex-col gap-1 rounded-lg bg-white p-1.5 ring-1 ring-slate-200">
+            {v && (
+              <Button size="sm" variant="ghost" onClick={() => setEditor({ menu: m, version: { ...v, prices: { ...v.prices } }, isNewMenu: false, isNewVersion: false })}>
+                잘못 적은 값 고치기
+              </Button>
+            )}
+            <Button size="sm" variant="ghost" onClick={() => update((d) => ({ ...d, menus: d.menus.map((x) => (x.id === m.id ? { ...x, onSale: !x.onSale } : x)) }), m.onSale ? '판매 중지로 바꿨습니다.' : '판매 중으로 바꿨습니다.')}>
+              {m.onSale ? '판매 중지' : '판매 재개'}
+            </Button>
+            <Button
+              size="sm"
+              variant="danger"
+              onClick={async () => {
+                if (await confirm({ title: '메뉴 삭제', message: `"${m.name}"과 모든 가격·원가 버전을 삭제합니다. 이미 저장된 매출·비용 실적은 바뀌지 않습니다.`, confirmText: '삭제' }))
+                  update((d) => ({ ...d, menus: d.menus.filter((x) => x.id !== m.id) }), '메뉴를 삭제했습니다.');
+              }}
+            >
+              삭제
+            </Button>
+          </div>
+        </details>
+      </div>
+  );
+
   return (
     <>
       <PageHeader
@@ -80,6 +112,27 @@ export function Menus() {
           <EmptyState title="등록된 메뉴가 없습니다" description="메뉴를 등록하면 판매 방식별 원가율과 메뉴당 남는 금액을 볼 수 있습니다. 매출 입력은 메뉴 없이도 가능합니다." />
         ) : (
           <Card title={`메뉴 ${menus.length}개`} subtitle="원가율 = 원가 ÷ 해당 판매 방식 판매가격. 메뉴별 판매량을 받지 않으므로 전체 원가율과 같지 않습니다.">
+            {/* 휴대폰: 메뉴마다 카드 (주 행동 '가격·원가 변경'이 바로 보이게) */}
+            <ul className="space-y-2 sm:hidden" aria-label="메뉴 목록">
+              {menus.map((m) => {
+                const v = menuVersionAt(m, asOf);
+                return (
+                  <li key={m.id} className={`rounded-lg p-3 ring-1 ring-slate-200 ${m.onSale ? '' : 'text-slate-400'}`}>
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <span className="font-semibold">{m.name}</span>
+                      {!m.onSale && <Badge>판매 중지</Badge>}
+                      {!v || v.costMode === 'unknown' ? <Badge tone="red">원가 미입력</Badge> : v.costSource === 'actual' ? <Badge tone="green">실제</Badge> : <Badge tone="amber">추정</Badge>}
+                    </div>
+                    <p className="mt-1 text-sm text-slate-700">
+                      {channels.map((c) => (v?.prices[c] == null ? null : `${CHANNEL_LABEL[c]} ${fmt(v.prices[c], 'won')}`)).filter(Boolean).join(' · ') || '기준일에 적용 버전 없음'}
+                    </p>
+                    <p className="text-xs text-slate-600">적용 시작일 {v ? v.effectiveFrom : '—'}</p>
+                    <div className="mt-2">{rowActions(m, v)}</div>
+                  </li>
+                );
+              })}
+            </ul>
+            <div className="hidden sm:block">
             <TableWrap>
               <thead>
                 <tr>
@@ -132,35 +185,14 @@ export function Menus() {
                         {!v || v.costMode === 'unknown' ? <Badge tone="red">원가 미입력</Badge> : v.costSource === 'actual' ? <Badge tone="green">실제</Badge> : <Badge tone="amber">추정</Badge>}
                       </td>
                       <td className={td}>
-                        <div className="flex flex-wrap gap-1">
-                          <Button size="sm" onClick={() => setEditor({ menu: m, version: { ...newVersion(), prices: { ...(v?.prices ?? newVersion().prices) }, costMode: v?.costMode ?? 'unknown', costAmount: v?.costAmount ?? null, costRate: v?.costRate ?? null, costSource: v?.costSource ?? 'actual' }, isNewMenu: false, isNewVersion: true })}>
-                            가격·원가 변경
-                          </Button>
-                          {v && (
-                            <Button size="sm" variant="ghost" onClick={() => setEditor({ menu: m, version: { ...v, prices: { ...v.prices } }, isNewMenu: false, isNewVersion: false })}>
-                              버전 정정
-                            </Button>
-                          )}
-                          <Button size="sm" variant="ghost" onClick={() => update((d) => ({ ...d, menus: d.menus.map((x) => (x.id === m.id ? { ...x, onSale: !x.onSale } : x)) }), m.onSale ? '판매 중지로 바꿨습니다.' : '판매 중으로 바꿨습니다.')}>
-                            {m.onSale ? '판매 중지' : '판매 재개'}
-                          </Button>
-                          <Button
-                            size="sm"
-                            variant="danger"
-                            onClick={async () => {
-                              if (await confirm({ title: '메뉴 삭제', message: `"${m.name}"과 모든 가격·원가 버전을 삭제합니다. 이미 저장된 매출·비용 실적은 바뀌지 않습니다.`, confirmText: '삭제' }))
-                                update((d) => ({ ...d, menus: d.menus.filter((x) => x.id !== m.id) }), '메뉴를 삭제했습니다.');
-                            }}
-                          >
-                            삭제
-                          </Button>
-                        </div>
+                        {rowActions(m, v)}
                       </td>
                     </tr>
                   );
                 })}
               </tbody>
             </TableWrap>
+            </div>
           </Card>
         )}
       </div>
@@ -181,7 +213,7 @@ function MenuEditor({ menu, version, isNewMenu, isNewVersion, onClose }: { menu:
     const e: Record<string, string> = {};
     if (!name.trim()) e.name = '메뉴명을 입력하세요.';
     if (!isValidDate(v.effectiveFrom)) e.effectiveFrom = '적용 시작일을 입력하세요.';
-    if (menu.versions.some((x) => x.id !== v.id && x.effectiveFrom === v.effectiveFrom)) e.effectiveFrom = '같은 적용 시작일의 버전이 이미 있습니다. 그 버전을 정정하세요.';
+    if (menu.versions.some((x) => x.id !== v.id && x.effectiveFrom === v.effectiveFrom)) e.effectiveFrom = '같은 적용 시작일의 버전이 이미 있습니다. 그 버전에서 ‘더보기 › 잘못 적은 값 고치기’를 쓰세요.';
     if (CHANNELS.every((c) => v.prices[c] === null)) e.prices = '판매가격을 하나 이상 입력하세요.';
     if (CHANNELS.some((c) => v.prices[c] !== null && v.prices[c]! < 0)) e.prices = '가격은 0 이상입니다.';
     if (v.costMode === 'amount' && v.costAmount === null) e.cost = '원가 금액을 입력하거나 "모름"을 선택하세요.';
@@ -203,13 +235,13 @@ function MenuEditor({ menu, version, isNewMenu, isNewVersion, onClose }: { menu:
       const versions = isNewVersion ? [...base.versions, clean] : base.versions.map((x) => (x.id === clean.id ? clean : x));
       const updated: Menu = { ...base, name: name.trim(), versions };
       return { ...d, menus: exists ? d.menus.map((m) => (m.id === menu.id ? updated : m)) : [...d.menus, updated] };
-    }, isNewMenu ? '메뉴를 추가했습니다.' : isNewVersion ? '새 가격·원가 버전을 추가했습니다. 적용 시작일 이전에는 기존 버전이 적용됩니다.' : '버전을 정정했습니다.');
+    }, isNewMenu ? '메뉴를 추가했습니다.' : isNewVersion ? '새 가격·원가 버전을 추가했습니다. 적용 시작일 이전에는 기존 버전이 적용됩니다.' : '기존 입력 오류를 고쳤습니다. 이 버전이 적용되던 날짜의 계산에 그대로 반영돼요.');
     onClose();
   };
 
   return (
     <Modal
-      title={isNewMenu ? '메뉴 추가' : isNewVersion ? `${menu.name} — 가격·원가 변경 (새 버전)` : `${menu.name} — 버전 정정`}
+      title={isNewMenu ? '메뉴 추가' : isNewVersion ? `${menu.name} — 가격·원가 변경` : `${menu.name} — 잘못 적은 값 고치기`}
       onClose={onClose}
       footer={
         <>
@@ -221,10 +253,17 @@ function MenuEditor({ menu, version, isNewMenu, isNewVersion, onClose }: { menu:
       }
     >
       <div className="grid gap-3 sm:grid-cols-2">
+        {!isNewMenu && (
+          <Notice tone={isNewVersion ? 'info' : 'warn'} className="sm:col-span-2">
+            {isNewVersion
+              ? `${isValidDate(v.effectiveFrom) ? `${Number(v.effectiveFrom.slice(5, 7))}월 ${Number(v.effectiveFrom.slice(8, 10))}일` : '적용 시작일'}부터 새 가격·원가가 적용돼요. 그 전 날짜의 계산은 그대로예요.`
+              : '이 버전이 적용되던 모든 날짜의 계산이 함께 바뀌어요. 가격이 실제로 바뀐 것이라면 취소하고 ‘가격·원가 변경’을 쓰세요.'}
+          </Notice>
+        )}
         <Field label="메뉴명" required error={err.name}>
           {(id) => <TextInput id={id} value={name} onChange={setName} invalid={!!err.name} />}
         </Field>
-        <Field label="적용 시작일" required error={err.effectiveFrom} hint={isNewVersion ? '이 날짜부터 새 가격·원가가 적용됩니다.' : '잘못 입력한 값을 고칠 때만 정정하세요.'}>
+        <Field label="적용 시작일" required error={err.effectiveFrom} hint={isNewVersion ? '이 날짜부터 새 가격·원가가 적용됩니다.' : undefined}>
           {(id) => <DateInput id={id} value={v.effectiveFrom} onChange={(x) => setV({ ...v, effectiveFrom: x })} />}
         </Field>
         <div className="sm:col-span-2">

@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Bar, BarChart, CartesianGrid, Legend, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import { PeriodPicker, defaultRanges } from '../components/PeriodPicker';
 import { QuickEntry, TodayStatus, type QuickEntryProps } from '../components/QuickEntry';
@@ -7,6 +7,8 @@ import {
   BasisBadge,
   BigWon,
   Button,
+  MAN_THRESHOLD,
+  manText,
   CalcValue,
   MixBadge,
   Card,
@@ -15,7 +17,6 @@ import {
   EmptyState,
   More,
   Notice,
-  PageHeader,
   TableWrap,
   ToggleGroup,
   td,
@@ -26,18 +27,18 @@ import {
 import { ESTIMATED_HINT } from '../domain/costBasis';
 import { GAP_NOTE, bucketTotal, comparableValue, compareCalc, compareValues, computeComparison, discountCalc, missingCostCount, profitForDisplay, quantityCalc, type ChannelSummary, type PeriodSummary } from '../domain/calc';
 import { gapTarget } from '../components/RecordGaps';
-import { recordGaps } from '../domain/review';
+import { UnclosedDays } from '../components/UnclosedDays';
+import { calcReasons, reasonLine, recordGaps } from '../domain/review';
 import { settlementTodos, setupHint, type SetupHint } from '../domain/settlement';
 import { pendingEstimates, type PendingItem } from '../domain/pending';
 import { monthOf } from '../domain/months';
-import { WEEKDAY_LABELS, formatRange, isValidRange, shortDate, todayStr } from '../domain/dates';
-import { diagnoseSummaries, homeHeadline, topIssues } from '../domain/diagnosis';
-import { ImpactNote, ImpactTag, RelatedCauses } from '../components/RelatedCauses';
-import { newProblem } from '../domain/factory';
-import { presetRanges, referenceDate, type PeriodPreset } from '../domain/periods';
+import { WEEKDAY_LABELS, formatRange, isFullMonth, isValidRange, shortDate } from '../domain/dates';
+import { LENGTH_NOTE, diagnoseSummaries, homeHeadline, perBusinessDay, plainFact, topIssues } from '../domain/diagnosis';
+import { ImpactDetail, NeedMoreRecords } from '../components/ChangeFocus';
+import { appToday, periodWords, presetRanges, referenceDate, type PeriodPreset } from '../domain/periods';
 import type { SalesEntry } from '../domain/types';
 import { SalesEditor } from './SalesCosts';
-import { fmt, fmtCalc, type Unit } from '../domain/format';
+import { fmt, fmtCalc, fmtSigned, type Unit } from '../domain/format';
 import { CHANNEL_COLOR, CHANNEL_LABEL } from '../domain/labels';
 import { CHANNELS, type Calc, type Channel } from '../domain/types';
 import { useApp, useData } from '../state/AppContext';
@@ -46,14 +47,20 @@ const man = (n: number) => (Math.abs(n) >= 10000 ? `${Math.round(n / 10000).toLo
 
 type PeriodChoice = PeriodPreset | 'custom';
 
+/** "10.25" */
+const dot = (d: string) => `${Number(d.slice(5, 7))}.${Number(d.slice(8, 10))}`;
+/** "약 81만 원" (10만 원 이상은 만 원 단위로 줄인 값임을 밝힌다) */
+const approx = (n: number) => (Math.abs(n) >= MAN_THRESHOLD ? `약 ${manText(Math.abs(n))}` : fmt(Math.abs(n), 'won'));
+
 export function Dashboard() {
   const data = useData();
-  const { navigate } = useApp();
-  const [choice, setChoice] = useState<PeriodChoice>('recent28');
+  const { period, setPeriod } = useApp();
+  // 처음에는 이번 달. 장사 점검에 다녀와도 고른 기간을 유지한다
+  const [choice, setChoice] = useState<PeriodChoice>((period?.choice as PeriodChoice | undefined) ?? 'month');
   const ref = referenceDate(data);
-  const today = todayStr();
+  const today = appToday(data);
   const preset = choice === 'custom' ? null : presetRanges(choice, today, ref);
-  const init = useMemo(() => defaultRanges(data), []); // eslint-disable-line react-hooks/exhaustive-deps
+  const init = useMemo(() => (period?.choice === 'custom' ? { cur: period.cur, prev: period.prev } : defaultRanges(data)), []); // eslint-disable-line react-hooks/exhaustive-deps
   const [customCur, setCustomCur] = useState(init.cur);
   const [customPrev, setCustomPrev] = useState(init.prev);
   const cur = preset ? preset.cur : customCur;
@@ -62,6 +69,10 @@ export function Dashboard() {
   const pair = useMemo(() => (valid ? computeComparison(data, cur, prev) : null), [data, cur.start, cur.end, prev.start, prev.end, valid]); // eslint-disable-line react-hooks/exhaustive-deps
   const s = pair?.s ?? null;
   const p = pair?.p ?? null;
+  const words = valid ? periodWords(today, ref, cur, prev) : null;
+  useEffect(() => {
+    if (valid) setPeriod({ choice, cur, prev });
+  }, [choice, cur.start, cur.end, prev.start, prev.end, valid]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // 첫 매출 기록일 이전은 '입력을 건너뛴 날'이 아니므로 미입력 안내에서 뺀다 (계산에서는 어차피 빠짐)
   const firstDate = useMemo(() => data.sales.reduce((m, e) => (m === '' || e.date < m ? e.date : m), ''), [data.sales]);
@@ -71,24 +82,77 @@ export function Dashboard() {
   const [hint, setHint] = useState<SetupHint | null>(null);
   const storeChannels = data.store?.channels ?? [];
   const firstChannel: Channel | null = data.sales.length ? null : storeChannels.includes('delivery') ? 'delivery' : (storeChannels[0] ?? null);
+  const startRecord = () => setQuick(firstChannel ? { channel: firstChannel } : {});
 
   return (
     <>
-      <PageHeader title="홈" description="오늘 기록하고, 주 1회 남은 돈과 먼저 볼 문제를 확인하세요." />
-      <div className="space-y-4">
-        {/* ① 오늘 매출 기록하기 — 첫 기록 전에는 운영하는 판매 방식(배달 우선)으로 바로 연다 */}
-        <Button variant="primary" className="w-full py-3 text-base sm:w-auto sm:px-6" onClick={() => setQuick(firstChannel ? { channel: firstChannel } : {})}>
-          ＋ {firstChannel ? `오늘 ${CHANNEL_LABEL[firstChannel]} 매출 기록하기` : '오늘 매출 기록하기'}
-        </Button>
-        {!data.sales.length && <p className="-mt-2 text-sm text-slate-600">수수료율이나 원가율을 몰라도 매출과 주문 수만 먼저 저장할 수 있어요.</p>}
+      <h1 className="sr-only">홈</h1>
+      <div className="space-y-3 sm:space-y-4">
+        {/* ① 선택한 기간에 얼마 팔고 얼마 남았나 — 기간·비교 기준은 한 번만, 매출과 이익은 연속된 두 줄 */}
+        <section aria-label="기간 요약" className="rounded-xl bg-white p-4 shadow-sm ring-1 ring-slate-200 sm:p-5">
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+            <select
+              aria-label="조회 기간"
+              value={choice}
+              onChange={(e) => setChoice(e.target.value as PeriodChoice)}
+              className="rounded-lg border border-slate-300 bg-white py-1.5 pl-2 pr-8 text-base font-semibold text-slate-900"
+            >
+              <option value="month">이번 달</option>
+              <option value="week">이번 주</option>
+              <option value="recent28">최근 4주</option>
+              <option value="custom">직접 선택</option>
+            </select>
+            {valid && words && (
+              <span className="text-sm text-slate-700" aria-label="집계 기간">
+                <span className="tabular">
+                  {dot(cur.start)}~{dot(cur.end)}
+                </span>{' '}
+                · {words.compare}
+              </span>
+            )}
+          </div>
+          {choice === 'custom' && (
+            <div className="mt-3">
+              <PeriodPicker
+                data={data}
+                cur={customCur}
+                prev={customPrev}
+                onChange={(c, pr) => {
+                  setCustomCur(c);
+                  setCustomPrev(pr);
+                }}
+              />
+            </div>
+          )}
+          {!data.sales.length ? (
+            <div className="mt-3">
+              <p className="text-sm text-slate-700">아직 계산할 매출 기록이 없어요. 오늘 매출을 적으면 여기에 판 돈과 남은 돈이 나와요.</p>
+              <Button variant="primary" className="mt-3 w-full py-3 text-base sm:w-auto sm:px-6" onClick={startRecord}>
+                첫 매출 기록하기
+              </Button>
+            </div>
+          ) : s && p ? (
+            <>
+              <SummaryRows s={s} p={p} />
+              <More summary="계산 내역 보기" className="mt-3">
+                <div className="space-y-3">
+                  <p className="text-sm text-slate-700">{preset ? `${preset.label} · ${preset.compareLabel}` : `${formatRange(cur)} · ${formatRange(prev)}와 비교`}</p>
+                  <CalcDetail s={s} p={p} />
+                  <UnclosedDays days={s.unrecordedDays.filter((d) => d <= today && d >= firstDate)} onEnter={(d) => setQuick({ date: d })} />
+                </div>
+              </More>
+            </>
+          ) : (
+            <p className="mt-3 text-sm text-red-700">조회 기간을 올바르게 고르세요.</p>
+          )}
+        </section>
+
         {hint && (
           <Notice tone="info">
             <p className="font-medium">첫 기록을 저장했어요</p>
             <p className="mt-0.5 text-sm">{hint.text}</p>
             <div className="mt-2 flex flex-wrap gap-2">
-              <Button size="sm" variant="primary" onClick={() => navigate('store', { section: hint.section })}>
-                지금 설정하기
-              </Button>
+              <HintGo section={hint.section} />
               <Button size="sm" onClick={() => setHint(null)}>
                 나중에
               </Button>
@@ -96,70 +160,28 @@ export function Dashboard() {
           </Notice>
         )}
 
-        {/* ② 오늘 입력 현황 */}
+        {/* ② 오늘 기록 — 기록할 날짜와 진행 상태 (이익 집계 기간과 따로) */}
         <TodayStatus
           date={statusDate}
           onDateChange={setStatusDate}
           onEnter={(slot) => setQuick({ date: statusDate, channel: slot.channel, routeId: slot.routeId })}
           onEdit={(e) => setDetail(structuredClone(e))}
+          onStart={() => (statusDate === today ? startRecord() : setQuick({ date: statusDate }))}
+          startLabel={statusDate !== today ? '이 날 매출 기록하기' : firstChannel ? `오늘 ${CHANNEL_LABEL[firstChannel]} 매출 기록하기` : '오늘 매출 기록하기'}
         />
 
-        {!data.sales.length ? (
-          <EmptyState
-            title="아직 매출 기록이 없습니다"
-            description="오늘 매출을 기록하면 이곳에 기간별 영업이익과 먼저 확인할 문제가 표시됩니다."
-            action={<Button onClick={() => navigate('store')}>가게 설정 확인</Button>}
-          />
-        ) : (
-          <>
-            {/* ③ 선택 기간의 예상 영업이익과 변화 */}
-            <section aria-label="기간 요약" className="rounded-xl bg-white p-4 shadow-sm ring-1 ring-slate-200 sm:p-5">
-              <h2 className="text-base font-semibold text-slate-900">주간 점검 · 얼마 남았나</h2>
+        {/* ③ 같은 기간에서 가장 먼저 살펴볼 변화 한 가지 */}
+        {s && p && words && data.sales.length > 0 && <TopIssues s={s} p={p} name={words.name} than={words.than} />}
+
+        {/* ④ 상세 표·차트는 필요할 때 펼친다 */}
+        {s && p && data.sales.length > 0 && (
+          <section aria-label="상세 표와 차트">
+            <More summary="상세 표와 차트 보기">
               <div className="mt-2">
-                <ToggleGroup
-                  value={choice}
-                  onChange={setChoice}
-                  options={[
-                    { value: 'week', label: '이번 주' },
-                    { value: 'month', label: '이번 달' },
-                    { value: 'recent28', label: '최근 4주' },
-                    { value: 'custom', label: '직접 선택' },
-                  ]}
-                />
+                <DashboardBody s={s} p={p} compareWord={words?.than ?? '비교 기간보다'} />
               </div>
-              <p className="mt-2 text-sm text-slate-800">
-                <b>{preset ? preset.label : `직접 선택 ${isValidRange(cur) ? formatRange(cur) : ''}`}</b>
-                <br />
-                <span className="text-slate-700">{preset ? preset.compareLabel : isValidRange(prev) ? `${formatRange(prev)}와 비교` : ''}</span>
-              </p>
-              {choice === 'custom' && (
-                <More summary="조회·비교 기간 조정" defaultOpen className="mt-2">
-                  <PeriodPicker
-                    data={data}
-                    cur={customCur}
-                    prev={customPrev}
-                    onChange={(c, pr) => {
-                      setCustomCur(c);
-                      setCustomPrev(pr);
-                    }}
-                  />
-                </More>
-              )}
-              {s && p && <PeriodHeadline s={s} p={p} />}
-              {s && p && <UnrecordedDays days={s.unrecordedDays.filter((d) => d <= today && d >= firstDate)} paired={p.pairedExcluded} onEnter={(d) => setQuick({ date: d })} />}
-            </section>
-
-            {/* ④ 먼저 확인할 문제 */}
-            {s && p && <TopIssues s={s} p={p} />}
-
-            {/* ⑤ 상세 표와 차트 */}
-            {s && p && (
-              <section aria-label="상세 표와 차트" className="space-y-4">
-                <h2 className="pt-2 text-lg font-semibold text-slate-900">상세 표와 차트</h2>
-                <DashboardBody s={s} p={p} />
-              </section>
-            )}
-          </>
+            </More>
+          </section>
         )}
       </div>
       {quick && (
@@ -179,88 +201,134 @@ export function Dashboard() {
   );
 }
 
-/** 홈 요약 아래: 계산에서 뺀 미입력 영업일과 바로 입력하기 */
-function UnrecordedDays({ days, paired, onEnter }: { days: string[]; paired: string[]; onEnter: (d: string) => void }) {
-  if (!days.length) return null;
-  const shown = days.slice(-3).reverse();
+function HintGo({ section }: { section: string }) {
+  const { navigate } = useApp();
   return (
-    <div aria-label="미입력 영업일" className="mt-3 rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-900 ring-1 ring-amber-200">
-      <ul className="space-y-1">
-        {shown.map((d) => (
-          <li key={d} className="flex flex-wrap items-center gap-x-2 gap-y-1">
-            <span>
-              <span aria-hidden>⚠ </span>
-              <b>{shortDate(d)} 미입력</b>
-            </span>
-            <button type="button" className="font-medium underline" aria-label={`${shortDate(d)} 매출 입력하기`} onClick={() => onEnter(d)}>
-              → 입력하기
+    <Button size="sm" variant="primary" onClick={() => navigate('store', { section })}>
+      지금 설정하기
+    </Button>
+  );
+}
+
+/**
+ * 매출 / (예상) 이익 두 줄: 금액과 비교 기간 대비 변화. 해석을 바꾸는 상태(매출 미입력·비용 누락·추정 비용·비교 자료 부족)는
+ * 그 금액 바로 아래에 둔다. 비교할 수 없으면 증감을 만들지 않고 이유만 쓴다.
+ */
+function SummaryRows({ s, p }: { s: PeriodSummary; p: PeriodSummary }) {
+  const data = useData();
+  const { navigate } = useApp();
+  const missingCosts = missingCostCount(s);
+  const gaps = recordGaps(data, s).filter((g) => g.kind === 'sales');
+  const gapCount = gaps.reduce((n, g) => n + g.dates.length, 0);
+  const months = isFullMonth(s.range) && isFullMonth(p.range);
+  const lengthsDiffer = s.calendarDays !== p.calendarDays && !months;
+  const why = (c: Calc, pc: Calc) =>
+    !p.entryCount ? '비교 자료 없음' : lengthsDiffer ? '기간 길이 다름' : c.salesGap || pc.salesGap ? '비교 보류' : comparableValue(c) === null || comparableValue(pc) === null ? '비교 불가' : null;
+  const estNames = s.costBreakdown.filter((r) => r.estimated > 0).sort((a, b) => b.estimated - a.estimated).map((r) => r.label);
+  const sales = profitForDisplay(s.totalSales);
+  const profit = profitForDisplay(s.operatingProfit);
+
+  const amount = (c: Calc, shown: { amount: number | null; provisional: boolean }) =>
+    shown.amount !== null ? (
+      <span className="flex min-w-0 flex-wrap items-baseline gap-x-1.5">
+        <span className="whitespace-nowrap">
+          {Math.abs(shown.amount) >= MAN_THRESHOLD && <><span className="text-sm font-semibold text-slate-700">약</span> </>}
+          <BigWon value={shown.amount} className="text-xl font-bold text-slate-900 sm:text-2xl" />
+        </span>
+        {shown.provisional && <span className="text-xs font-medium text-slate-600">{c.salesGap ? '일부 확인' : '미확정'}</span>}
+      </span>
+    ) : (
+      <CalcValue calc={c} unit="won" />
+    );
+  const delta = (c: Calc, pc: Calc) => {
+    const r = why(c, pc);
+    if (r) return <span className="text-sm text-slate-600">{r}</span>;
+    const d = comparableValue(c)! - comparableValue(pc)!;
+    return <b className={`text-sm ${d > 0 ? 'text-emerald-800' : d < 0 ? 'text-red-800' : 'text-slate-800'}`}>{d === 0 ? '변화 없음' : `${approx(d)} ${d > 0 ? '증가' : '감소'}`}</b>;
+  };
+  const row = 'grid grid-cols-[4rem_1fr_auto] items-baseline gap-x-2 sm:grid-cols-[4.5rem_1fr_auto]';
+  const note = 'col-start-2 col-span-2 text-sm';
+  return (
+    <div className="mt-3 space-y-2">
+      <div className={row} aria-label="매출">
+        <span className="text-sm font-medium text-slate-700">매출</span>
+        {amount(s.totalSales, sales)}
+        {delta(s.totalSales, p.totalSales)}
+        {gapCount > 0 && (
+          <p className={`${note} text-amber-900`}>
+            ⚠ 기록하지 않은 경로·날 {gapCount}곳 · 입력된 기록만 더한 값{' '}
+            <button className="font-medium underline" onClick={() => navigate('sales', gapTarget(gaps[0]))}>
+              기록 채우기
             </button>
-          </li>
-        ))}
-      </ul>
-      {days.length > shown.length && <p className="mt-1">외 {days.length - shown.length}일 더 있어요.</p>}
-      <p className="mt-1 text-xs text-amber-800">
-        매출 기록도 '매출 없음' 확인도 없는 영업일은 0원으로 보지 않고 매출·영업일 수·월세 등 기간 비용 계산에서 뺐어요.
-        {paired.length > 0 && ` 비교 기간에서도 같은 순서의 날(${paired.map(shortDate).join(', ')})을 빼고 비교해요.`}
-      </p>
+          </p>
+        )}
+      </div>
+      <div className={row} aria-label="이익">
+        <span className="text-sm font-medium text-slate-700">{!profit.provisional && s.operatingProfit.estimated ? '예상 이익' : '이익'}</span>
+        {amount(s.operatingProfit, profit)}
+        {delta(s.operatingProfit, p.operatingProfit)}
+        {profit.provisional && missingCosts > 0 && (
+          <p className={`${note} text-amber-900`}>
+            ⚠ 비용 {missingCosts}개 미입력 · 실제보다 높게 보일 수 있음{' '}
+            <button className="font-medium underline" onClick={() => navigate('sales')}>
+              보완하기
+            </button>
+          </p>
+        )}
+        {estNames.length > 0 && (
+          <p className={`${note} text-slate-700`} title={ESTIMATED_HINT}>
+            ≈ {estNames.slice(0, 2).join('·')}
+            {estNames.length > 2 ? ' 등' : ''} 추정 포함
+          </p>
+        )}
+        {lengthsDiffer && p.entryCount > 0 && <p className={`${note} text-slate-600`}>{LENGTH_NOTE} · 계산 내역에서 영업일당으로 보세요</p>}
+      </div>
     </div>
   );
 }
 
-const PROFIT_NOTE ='운영으로 남긴 이익입니다. 통장 잔액과는 다를 수 있어요.';
-
-function PeriodHeadline({ s, p }: { s: PeriodSummary; p: PeriodSummary }) {
-  const { navigate } = useApp();
-  const estimated = !!s.operatingProfit.estimated;
-  const shownProfit = profitForDisplay(s.operatingProfit);
-  const missingCosts = missingCostCount(s);
+/** 계산 내역: 요약 문장, 정확한 원 단위 금액, 매출·영업일당, 월 비교 표, 채울 할 일 */
+function CalcDetail({ s, p }: { s: PeriodSummary; p: PeriodSummary }) {
   const data = useData();
-  // 성과 확인과 같은 기준: 기록하지 않은 경로·날이 있으면 부분 합계라 이전 기간과 빼지 않는다
-  const gaps = recordGaps(data, s).filter((g) => g.kind === 'sales');
-  const gapCount = gaps.reduce((n, g) => n + g.dates.length, 0);
+  const shownProfit = profitForDisplay(s.operatingProfit);
+  const why = calcReasons(data, s, 'all');
+  // 두 기간 길이가 다르면 총액 대신 영업일당으로 (단, 달력 한 달끼리는 월 총액을 비교한다)
+  const months = isFullMonth(s.range) && isFullMonth(p.range);
+  const lengthsDiffer = s.calendarDays !== p.calendarDays && !months;
   const prevCmp = comparableValue(p.operatingProfit);
   const curCmp = comparableValue(s.operatingProfit);
   return (
-    <div className="mt-3 space-y-3">
+    <div className="space-y-3">
       <p className="rounded-lg bg-slate-900 px-4 py-3 text-base font-medium text-white">{homeHeadline(p, s)}</p>
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
         <div className="rounded-lg p-3 ring-1 ring-slate-200">
-          <div className="text-sm font-medium text-slate-700">{estimated ? '예상 영업이익' : '영업이익'}</div>
+          <div className="text-sm font-medium text-slate-700">{s.operatingProfit.estimated ? '예상 영업이익' : '영업이익'} (원 단위)</div>
           {shownProfit.amount !== null ? (
             <>
-              {/* 비용이 덜 채워져도 숫자는 크게, 미확정 표시는 작게 (입력된 비용만 반영한 값) */}
               <div className="mt-1 flex flex-wrap items-baseline gap-2">
-                <BigWon value={shownProfit.amount} className="text-2xl font-bold text-slate-900" />
-                {shownProfit.provisional && <span className="text-xs font-medium text-slate-500">{s.operatingProfit.salesGap ? '일부 확인' : '미확정'}</span>}
+                <span className="tabular text-2xl font-bold text-slate-900">{fmt(shownProfit.amount, 'won')}</span>
                 {!shownProfit.provisional && <BasisBadge calc={s.operatingProfit} />}
               </div>
-              {prevCmp === null || curCmp === null ? (
+              {lengthsDiffer ? (
+                <>
+                  <DeltaText cmp={{ abs: null, pct: null, note: LENGTH_NOTE }} unit="won" />
+                  <p className="text-sm text-slate-700">
+                    영업일당 {fmt(perBusinessDay(p.operatingProfit, p), 'won', '계산 불가')} → {fmt(perBusinessDay(s.operatingProfit, s), 'won', '계산 불가')}
+                    {perBusinessDay(p.operatingProfit, p) !== null && perBusinessDay(s.operatingProfit, s) !== null && ` (${fmtSigned(perBusinessDay(s.operatingProfit, s)! - perBusinessDay(p.operatingProfit, p)!, 'won')})`}
+                  </p>
+                </>
+              ) : prevCmp === null || curCmp === null ? (
                 <DeltaText cmp={{ abs: null, pct: null, note: s.operatingProfit.salesGap || p.operatingProfit.salesGap ? GAP_NOTE : '비교 기간 데이터 필요' }} unit="won" />
               ) : (
                 <DeltaText cmp={compareValues(prevCmp, curCmp, 'profit')} unit="won" />
               )}
-              {gapCount > 0 && (
-                <p className="mt-1 text-sm text-amber-800">
-                  ⚠ 기록하지 않은 경로·날 {gapCount}곳 · 입력된 기록만 더한 값{' '}
-                  <button className="font-medium underline" onClick={() => navigate('sales', gapTarget(gaps[0]))}>
-                    기록 채우기
-                  </button>
-                </p>
-              )}
-              {shownProfit.provisional && missingCosts > 0 && (
-                <p className="mt-1 text-sm text-amber-800">
-                  ⚠ 비용 {missingCosts}개 미입력 · 실제보다 높게 보일 수 있음{' '}
-                  <button className="font-medium underline" onClick={() => navigate('sales')}>
-                    보완하기
-                  </button>
-                </p>
-              )}
             </>
           ) : (
             <div className="mt-1">
-              <CalcValue calc={s.operatingProfit} unit="won" size="lg" man />
+              <CalcValue calc={s.operatingProfit} unit="won" size="lg" />
             </div>
           )}
+          {reasonLine(s.operatingProfit, why) && <p className="mt-1 text-xs text-amber-800">근거: {reasonLine(s.operatingProfit, why)}</p>}
           <p className="mt-1 text-sm text-slate-600">{PROFIT_NOTE}</p>
         </div>
         <div className="rounded-lg p-3 ring-1 ring-slate-200">
@@ -268,7 +336,8 @@ function PeriodHeadline({ s, p }: { s: PeriodSummary; p: PeriodSummary }) {
           <div className="mt-1">
             <CalcValue calc={s.totalSales} unit="won" size="lg" man />
           </div>
-          <DeltaText cmp={compareCalc(p.totalSales, s.totalSales)} unit="won" />
+          {reasonLine(s.totalSales, why) && <p className="text-xs text-amber-800">근거: {reasonLine(s.totalSales, why)}</p>}
+          <DeltaText cmp={lengthsDiffer ? { abs: null, pct: null, note: `${LENGTH_NOTE} · 영업일당 매출로 보세요` } : compareCalc(p.totalSales, s.totalSales)} unit="won" />
         </div>
         <div className="rounded-lg p-3 ring-1 ring-slate-200">
           <div className="text-sm font-medium text-slate-700">영업일당 매출</div>
@@ -281,8 +350,60 @@ function PeriodHeadline({ s, p }: { s: PeriodSummary; p: PeriodSummary }) {
           </p>
         </div>
       </div>
+      {months && <MonthTable s={s} p={p} />}
       <SettlementTodos s={s} />
       {s.status.estimatedAmount > 0 && <PendingEstimates s={s} />}
+    </div>
+  );
+}
+
+const PROFIT_NOTE = '운영으로 남긴 이익입니다. 통장 잔액과는 다를 수 있어요.';
+
+/** 달력 한 달끼리 비교: 9월 실적 / 10월 실적 / 증감액(10월 − 9월) / 증감률(증감액 ÷ 9월 실적). 영업일 수·영업일당 실적도 함께 */
+function MonthTable({ s, p }: { s: PeriodSummary; p: PeriodSummary }) {
+  const m = (x: PeriodSummary) => `${Number(x.range.start.slice(5, 7))}월`;
+  const per = (c: Calc, x: PeriodSummary): Calc => {
+    const v = perBusinessDay(c, x);
+    return v === null ? { value: null, reason: c.salesGap ? 'incomplete' : 'noData', salesGap: c.salesGap } : { value: v };
+  };
+  const rows: [string, Calc, Calc, 'normal' | 'profit', Unit][] = [
+    ['순매출', p.totalSales, s.totalSales, 'normal', 'won'],
+    ['영업이익', p.operatingProfit, s.operatingProfit, 'profit', 'won'],
+    ['영업일 수', { value: p.businessDays }, { value: s.businessDays }, 'normal', 'days'],
+    ['영업일당 매출', per(p.totalSales, p), per(s.totalSales, s), 'normal', 'won'],
+    ['영업일당 영업이익', per(p.operatingProfit, p), per(s.operatingProfit, s), 'profit', 'won'],
+  ];
+  return (
+    <div aria-label="월 실적 비교" className="overflow-hidden rounded-lg ring-1 ring-slate-200">
+      <table className="w-full table-fixed text-sm">
+        <thead className="bg-slate-50 text-xs text-slate-600">
+          <tr>
+            <th className="w-[22%] px-2 py-2 text-left font-semibold">지표</th>
+            <th className="px-2 py-2 text-right font-semibold">{m(p)} 실적</th>
+            <th className="px-2 py-2 text-right font-semibold">{m(s)} 실적</th>
+            <th className="px-2 py-2 text-right font-semibold">증감액 · 증감률</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map(([label, a, b, kind, unit]) => (
+            <tr key={label} className="border-t border-slate-100 align-top">
+              <td className="px-2 py-2 text-slate-800">{label}</td>
+              <td className="break-words px-2 py-2 text-right">
+                <CalcValue calc={a} unit={unit} />
+              </td>
+              <td className="break-words px-2 py-2 text-right">
+                <CalcValue calc={b} unit={unit} />
+              </td>
+              <td className="break-words px-2 py-2 text-right">
+                <DeltaText cmp={compareCalc(a, b, kind)} unit={unit} />
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <p className="border-t border-slate-100 px-2 py-1.5 text-xs text-slate-500">
+        증감액 = {m(s)} − {m(p)}, 증감률 = 증감액 ÷ {m(p)} 실적. 달력 일수가 달라도({p.calendarDays}일 / {s.calendarDays}일) 월 총액을 비교하고, 영업일당 실적을 함께 봐요.
+      </p>
     </div>
   );
 }
@@ -355,58 +476,43 @@ function PendingEstimates({ s }: { s: PeriodSummary }) {
   );
 }
 
-function TopIssues({ s, p }: { s: PeriodSummary; p: PeriodSummary }) {
+/** 가장 먼저 살펴볼 변화 한 가지. '자세히 보기'는 읽기만 한다 (저장은 진단 화면의 '점검 목록에 저장'에서만) */
+function TopIssues({ s, p, name, than }: { s: PeriodSummary; p: PeriodSummary; name: string; than: string }) {
   const data = useData();
-  const { navigate, update } = useApp();
+  const { navigate } = useApp();
   const dx = useMemo(() => diagnoseSummaries(data, p, s, { channel: 'all', target: { key: 'operatingProfit', channel: 'all' }, targetValue: null }), [data, p, s]);
-  const issues = topIssues(dx, 3);
-  // 같은 기간의 문제가 이미 있으면 그 문제로, 없으면 이 기간으로 문제를 등록하고 진단 화면으로 이동
-  const openDiagnosis = (findingId?: string) => {
-    const found = data.problems.find((x) => x.analysis.start === s.range.start && x.analysis.end === s.range.end && x.compare.start === p.range.start && x.compare.end === p.range.end && x.channel === 'all');
-    if (found) {
-      navigate('diagnosis', { problem: found.id, ...(findingId ? { finding: findingId } : {}) });
-      return;
-    }
-    const prob = newProblem({ name: `${formatRange(s.range)} 영업이익 점검`, type: 'profitDecline', analysis: s.range, compare: p.range, channel: 'all', target: { key: 'operatingProfit', channel: 'all' } });
-    update((d) => ({ ...d, problems: [...d.problems, prob] }), '이 기간을 문제 진단에 등록했습니다.');
-    navigate('diagnosis', { problem: prob.id, ...(findingId ? { finding: findingId } : {}) });
+  const issue = topIssues(dx, 1)[0];
+  const saved = data.problems.find((x) => x.analysis.start === s.range.start && x.analysis.end === s.range.end && x.compare.start === p.range.start && x.compare.end === p.range.end && x.channel === 'all');
+  const open = (findingId?: string) => {
+    const f: Record<string, string> = findingId ? { finding: findingId } : {};
+    // 같은 기간에 저장한 점검이 있으면 그대로 열고, 없으면 저장하지 않은 미리 보기로 연다
+    if (saved) navigate('diagnosis', { problem: saved.id, ...f });
+    else navigate('diagnosis', { from: s.range.start, to: s.range.end, cfrom: p.range.start, cto: p.range.end, ...f });
   };
   return (
-    <section aria-label="먼저 확인할 문제" className="rounded-xl bg-white p-4 shadow-sm ring-1 ring-slate-200 sm:p-5">
-      <div className="mb-2 flex flex-wrap items-baseline justify-between gap-2">
-        <h2 className="text-base font-semibold text-slate-900">먼저 확인할 문제</h2>
-        <span className="text-sm text-slate-600">영업이익 영향이 큰 순서 · 최대 3개</span>
-      </div>
-      {!issues.length ? (
-        <p className="text-sm text-slate-700">기준(±5%) 이상으로 나빠진 항목이 없습니다. 상세 표에서 세부 수치를 확인하세요.</p>
+    <section aria-label="먼저 살펴볼 변화" className="rounded-xl bg-white p-4 shadow-sm ring-1 ring-slate-200 sm:p-5">
+      <h2 className="text-base font-semibold text-slate-900">먼저 살펴볼 변화</h2>
+      {!issue ? (
+        <div className="mt-1">
+          <NeedMoreRecords data={data} s={s} p={p} than={than} />
+        </div>
       ) : (
-        <>
-          <p className="mb-2 text-sm text-slate-800">원인으로 확인된 것은 아니에요. 아래 항목부터 살펴보세요.</p>
-          <ol className="space-y-2">
-            {issues.map((f, i) => (
-              <li key={f.id} className="rounded-lg p-3 ring-1 ring-slate-200">
-                <div className="flex flex-wrap items-baseline justify-between gap-2">
-                  <span className="font-semibold text-slate-900">
-                    {i + 1}. {f.title}
-                  </span>
-                  <ImpactTag finding={f} />
-                </div>
-                <p className="mt-1 text-sm text-slate-700">{f.fact}</p>
-                <ImpactNote finding={f} />
-                <RelatedCauses issue={f} />
-                <Button size="sm" className="mt-2" onClick={() => openDiagnosis(f.id)}>
-                  진단에서 자세히 보기
-                </Button>
-              </li>
-            ))}
-          </ol>
-        </>
+        <div className="mt-1">
+          {/* 관찰된 사실만 쉬운 말로. 추정 영향 금액은 접힌 상세에서 실제 이익 차이와 구분해 보여준다 */}
+          <p className="text-base font-medium text-slate-900">{plainFact(issue, name, than)}</p>
+          <p className="mt-0.5 text-xs text-slate-600">원인으로 확인된 것은 아니에요.</p>
+          <ImpactDetail finding={issue} s={s} p={p} />
+          <Button size="sm" className="mt-2" onClick={() => open(issue.id)}>
+            {saved ? '저장한 점검 열기' : '자세히 보기'}
+          </Button>
+        </div>
       )}
     </section>
   );
 }
 
-function DashboardBody({ s, p }: { s: PeriodSummary; p: PeriodSummary }) {
+
+function DashboardBody({ s, p, compareWord }: { s: PeriodSummary; p: PeriodSummary; compareWord: string }) {
   const { navigate } = useApp();
   const weekdayDiff = WEEKDAY_LABELS.map((w, i) => ({ w, d: s.weekdayCounts[i] - p.weekdayCounts[i] })).filter((x) => x.d !== 0);
   return (
@@ -433,7 +539,7 @@ function DashboardBody({ s, p }: { s: PeriodSummary; p: PeriodSummary }) {
 
       <DataStatusCard s={s} onFix={() => navigate('sales')} />
 
-      <ChannelTable s={s} p={p} />
+      <ChannelTable s={s} p={p} compareWord={compareWord} />
 
       <div className="grid gap-4 xl:grid-cols-2">
         <ChannelChart s={s} p={p} />
@@ -543,7 +649,7 @@ const ROWS: RowDef[] = [
 ];
 
 /** 휴대폰: 판매 방식별 카드 */
-function ChannelCards({ s, p }: { s: PeriodSummary; p: PeriodSummary }) {
+function ChannelCards({ s, p, compareWord }: { s: PeriodSummary; p: PeriodSummary; compareWord: string }) {
   const keyRows = ROWS.filter((r) => ['순매출', '완료 주문 수', '홀 방문 고객 수', '객단가 / 평균 주문금액', '가게 부담 할인액', '판매 방식 비용을 뺀 금액', '주문 1건당 남는 금액'].includes(r.label));
   return (
     <div className="space-y-3 sm:hidden">
@@ -552,6 +658,7 @@ function ChannelCards({ s, p }: { s: PeriodSummary; p: PeriodSummary }) {
           <h3 className="mb-2 flex items-center gap-1.5 font-semibold">
             <ChannelDot color={CHANNEL_COLOR[c]} />
             {CHANNEL_LABEL[c]}
+            <span className="ml-auto text-xs font-normal text-slate-500">오른쪽 아래: {compareWord}</span>
           </h3>
           <dl className="space-y-2">
             {keyRows
@@ -592,10 +699,10 @@ function ChannelCards({ s, p }: { s: PeriodSummary; p: PeriodSummary }) {
   );
 }
 
-function ChannelTable({ s, p }: { s: PeriodSummary; p: PeriodSummary }) {
+function ChannelTable({ s, p, compareWord }: { s: PeriodSummary; p: PeriodSummary; compareWord: string }) {
   return (
-    <Card title="판매 방식별 실적" subtitle="각 값 아래는 비교 기간 대비 변화입니다.">
-      <ChannelCards s={s} p={p} />
+    <Card title="판매 방식별 실적">
+      <ChannelCards s={s} p={p} compareWord={compareWord} />
       <div className="hidden sm:block">
       <TableWrap>
         <thead>
@@ -607,6 +714,7 @@ function ChannelTable({ s, p }: { s: PeriodSummary; p: PeriodSummary }) {
                   <ChannelDot color={CHANNEL_COLOR[c]} />
                   {CHANNEL_LABEL[c]}
                 </span>
+                <div className="text-xs font-normal text-slate-500">값 · 아래 {compareWord}</div>
               </th>
             ))}
           </tr>
